@@ -43,7 +43,7 @@ class LgbModel:
         self.thr = 0.5
         self.modelPath = "../model/"
 
-    def train(self, X, y, num_round=8000, validX=None, validy=None, early_stopping=100, verbose=True, params={}):
+    def train(self, X, y, num_round=8000, validX=None, validy=None, early_stopping=200, verbose=True, params={}):
         trainData = lgb.Dataset(X, label=y, feature_name=self.feaName, categorical_feature=self.cateFea)
         trainParam = self.params
         trainParam.update(params)
@@ -55,7 +55,7 @@ class LgbModel:
         self.bst = bst
         return bst.best_iteration
 
-    def cv(self, X, y, nfold=5, num_round=8000, early_stopping=100, verbose=True, params={}):
+    def cv(self, X, y, nfold=5, num_round=8000, early_stopping=200, verbose=True, params={}):
         trainParam = self.params
         trainParam.update(params)
         trainData = lgb.Dataset(X, label=y, feature_name=self.feaName, categorical_feature=self.cateFea)
@@ -103,7 +103,7 @@ class LgbModel:
             resultDf['metric_mean'] = list(map(lambda x: getEval({k: x}), v))
         exit()
 
-def makeNewDf(df, statDf, ratio=[0.4233,0.117]):
+def makeNewDf(df, statDf, ratio=[0.4,0.2]):
     '''
     构造无历史记录数据集：打乱df后按比例分为3种情况处理
     '''
@@ -130,6 +130,18 @@ def makeNewDf(df, statDf, ratio=[0.4233,0.117]):
     df = pd.concat([prefixDf,titleDf,bothDf], ignore_index=True)
     return df
 
+def addTrainTiming(df, nFold=5):
+    '''
+    分批构造训练集历史特征
+    '''
+    kf = StratifiedKFold(n_splits=nFold, random_state=0, shuffle=True)
+    dfList = []
+    for i, (statIdx, taskIdx) in enumerate(kf.split(df.values, df['label'].values)):
+        tempDf = addHisFeas(df.iloc[taskIdx], df.iloc[statIdx])
+        dfList.append(tempDf)
+    df = pd.concat(dfList, ignore_index=True)
+    return df
+
 def main():
     ORIGIN_DATA_PATH = "../data/"
     FEA_OFFLINE_FILE = "../temp/fea_offline.csv"
@@ -151,14 +163,16 @@ def main():
         offlineDf = pd.concat([df,validDf,testADf], ignore_index=True)
 
         offlineDf = addGlobalFeas(offlineDf, df)
-        copyDf = makeNewDf(offlineDf[offlineDf.flag==0], df)
+        copyDf = makeNewDf(offlineDf[offlineDf.flag==0], df, [0.55,0.09])
         offlineDf = addHisFeas(offlineDf, df)
         offlineDf = pd.concat([offlineDf,copyDf], ignore_index=True)
+        # trainDf = addTrainTiming(offlineDf[offlineDf.flag==0])
+        # testDf = addHisFeas(offlineDf[offlineDf.flag!=0], df)
+        # offlineDf = pd.concat([trainDf,testDf], ignore_index=True)
         exportResult(offlineDf, FEA_OFFLINE_FILE)
         print('offline dataset ready')
     else:
         offlineDf = pd.read_csv(FEA_OFFLINE_FILE)
-        # offlineDf.rename(columns={'index':'order'}, inplace=True)
     # 获取线上特征工程数据集
     if not os.path.isfile(FEA_ONLINE_FILE):
         df = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
@@ -175,13 +189,15 @@ def main():
         statDf = pd.concat([df,validDf], ignore_index=True)
 
         onlineDf = addGlobalFeas(onlineDf, statDf)
-        copyDf = makeNewDf(onlineDf[onlineDf.flag==0], statDf,)
+        copyDf = makeNewDf(onlineDf[onlineDf.flag==0], statDf, [0.31,0.24])
         onlineDf = addHisFeas(onlineDf, statDf)
         onlineDf = pd.concat([onlineDf,copyDf], ignore_index=True)
+        # trainDf = addTrainTiming(onlineDf[onlineDf.flag>=0])
+        # testDf = addHisFeas(onlineDf[onlineDf.flag<0], statDf)
+        # onlineDf = pd.concat([trainDf,testDf], ignore_index=True)
         exportResult(onlineDf, FEA_ONLINE_FILE)
     else:
         onlineDf = pd.read_csv(FEA_ONLINE_FILE)
-        # onlineDf.rename(columns={'index':'order'}, inplace=True)
     print("feature dataset prepare: finished!")
     # exit()
 
@@ -226,22 +242,29 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_split3"
+    modelName = "lgb1_split_onoff"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
-    iterNum = model.train(trainX, trainy, validX=validX, validy=validy)
-    # 计算F1值
-    validX['predy'] = model.predict(validX)
-    model.thr = findF1Threshold(validX['predy'], validy)
-    print('F1阈值：', model.thr, '验证集f1分数：', metrics.f1_score(validy, getPredLabel(validX['predy'], model.thr)))
-    print('0.5阈值验证集f1分数：', metrics.f1_score(validy, getPredLabel(validX['predy'], 0.5)))
-    validX['predyLabel'] = getPredLabel(validX['predy'], model.thr)
-    print(validX[['predy','predyLabel']].describe())
-    print(validX.groupby('prefix_newVal')[['predy','predyLabel']].mean())
-    print(validX.groupby('title_newVal')[['predy','predyLabel']].mean())
+    iterList = []
+    thrList = []
+    for rd in range(3):
+        iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd})
+        iterList.append(iterNum)
+        # 计算F1值
+        validX['predy'] = model.predict(validX)
+        thr = findF1Threshold(validX['predy'], validy)
+        thrList.append(thr)
+        print('F1阈值：', thr, '验证集f1分数：', metrics.f1_score(validy, getPredLabel(validX['predy'], thr)))
+        validX['predyLabel'] = getPredLabel(validX['predy'], thr)
+        print(validX[['predy','predyLabel']].describe())
+        print(validX.groupby('prefix_newVal')[['predy','predyLabel']].mean())
+        print(validX.groupby('title_newVal')[['predy','predyLabel']].mean())
+    print('迭代次数：',iterList, '平均：', np.mean(iterList))
+    print('F1阈值：',thrList, '平均：', np.mean(thrList))
     # 正式模型
-    model.train(dfX, dfy, num_round=iterNum, verbose=False)
+    model.thr = np.mean(thrList)
+    model.train(dfX, dfy, num_round=int(np.mean(iterList)), verbose=False)
     model.feaScore()
     model.save(modelName)
 
@@ -252,19 +275,7 @@ def main():
     print(predictDf[['predicted_score','predicted_label']].describe())
     print(predictDf.groupby('prefix_newVal')[['predicted_score','predicted_label']].mean())
     print(predictDf.groupby('title_newVal')[['predicted_score','predicted_label']].mean())
-    # exportResult(predictDf[['predicted_label']], RESULT_PATH + "%s.csv"%modelName, header=False)
-    #
-    # # 5折stacking
-    # print('training oof...')
-    # df2 = originDf[originDf.flag>=0][['instance_id','hour','click']]
-    # df2['predicted_score'], predictDf['predicted_score'] = getOof(model, dfX, dfy, testX)
-    # print('cv5 valid loss:', metrics.log_loss(df2['click'], df2['predicted_score']))
-    # print(predictDf[['instance_id','predicted_score']].describe())
-    # print(predictDf[['instance_id','predicted_score']].head())
-    # print(predictDf.groupby('hour')['predicted_score'].mean())
-    # exportResult(df2[['instance_id','predicted_score']], "../result/lgb2_early100_oof_train.csv")
-    # exportResult(predictDf[['instance_id','predicted_score']], "../result/lgb2_early100_oof_test.csv")
-
+    exportResult(predictDf[['predicted_label']], RESULT_PATH + "%s.csv"%modelName, header=False)
 
 if __name__ == '__main__':
     startTime = datetime.now()
