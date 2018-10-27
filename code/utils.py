@@ -125,7 +125,7 @@ def findF1Threshold(predictList, labelList):
     f1Df = pd.DataFrame({'thr':thrList[:len(f1List)], 'f1':f1List}).sort_values(by=['f1','thr'], ascending=[False,True])
     bestThs = thrList[f1List.index(max(f1List))]
     averThr = f1Df.head(5).sort_values(by=['thr']).head(4)['thr'].mean()    # 取前5，去掉最大阈值后取平均
-    print('tops 5 thr:\n', f1Df.head(5),'aver thr:',averThr)
+    # print('tops 5 thr:\n', f1Df.head(5),'aver thr:',averThr)
     return averThr
 
 # 导出预测结果

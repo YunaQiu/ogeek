@@ -77,7 +77,7 @@ def addLabelFea(df, statDf, colArr, alias=None):
     else:
         tempDf = statDf.groupby(colArr)['label'].agg([len, 'sum'])
         tempDf['ratio'] = biasSmooth(tempDf['sum'], tempDf['len'])
-        # tempDf.loc[:,['len','sum']] /= tempDf[['len','sum']].sum()
+        tempDf.loc[:,['len','sum']] /= tempDf[['len','sum']].sum()
         tempDf.columns = ['%s_label_%s'%(alias,x) for x in tempDf.columns]
         df = df.merge(tempDf.reset_index(), 'left', on=colArr)
     return df

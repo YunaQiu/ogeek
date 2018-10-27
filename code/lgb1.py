@@ -43,17 +43,31 @@ class LgbModel:
         self.thr = 0.5
         self.modelPath = "../model/"
 
-    def train(self, X, y, num_round=8000, validX=None, validy=None, early_stopping=200, verbose=True, params={}):
-        trainData = lgb.Dataset(X, label=y, feature_name=self.feaName, categorical_feature=self.cateFea)
+    def train(self, X, y, num_round=8000, valid=0.05, validX=None, validy=None, early_stopping=200, verbose=True, params={}):
         trainParam = self.params
         trainParam.update(params)
-        if isinstance(validX, (pd.DataFrame, sparse.csr_matrix)):
+        trainData = lgb.Dataset(X, label=y, feature_name=self.feaName, categorical_feature=self.cateFea)
+        if validX is not None:
             validData = trainData.create_valid(validX, label=validy)
             bst = lgb.train(trainParam, trainData, num_boost_round=num_round, valid_sets=[trainData,validData], valid_names=['train', 'valid'], early_stopping_rounds=early_stopping, verbose_eval=verbose)
+            self.thr = findF1Threshold(bst.predict(validX), validy)
+        elif (valid is not None) and (valid is not False):
+            np.random.seed(seed=trainParam['seed'])
+            shuffleIdx = np.random.permutation(list(range(len(X))))
+            if valid < 1:
+                valid = max(int(len(X) * valid), 1)
+            trainIdx = shuffleIdx[valid:]
+            validIdx = shuffleIdx[:valid]
+            preTrain = lgb.Dataset(X[trainIdx], label=y[trainIdx], feature_name=self.feaName, categorical_feature=self.cateFea)
+            preValid = preTrain.create_valid(X[validIdx], label=y[validIdx])
+            bst = lgb.train(trainParam, preTrain, num_boost_round=num_round, valid_sets=[preTrain,preValid], valid_names=['train', 'valid'], early_stopping_rounds=early_stopping, verbose_eval=verbose)
+            self.thr = findF1Threshold(bst.predict(X[validIdx]), y[validIdx])
+            num_round = bst.best_iteration
+            bst = lgb.train(trainParam, trainData, num_boost_round=num_round)
         else:
             bst = lgb.train(trainParam, trainData, valid_sets=trainData, num_boost_round=num_round, verbose_eval=verbose)
         self.bst = bst
-        return bst.best_iteration
+        return (bst.best_iteration if bst.best_iteration>0 else num_round)
 
     def cv(self, X, y, nfold=5, num_round=8000, early_stopping=200, verbose=True, params={}):
         trainParam = self.params
@@ -163,12 +177,9 @@ def main():
         offlineDf = pd.concat([df,validDf,testADf], ignore_index=True)
 
         offlineDf = addGlobalFeas(offlineDf, df)
-        copyDf = makeNewDf(offlineDf[offlineDf.flag==0], df, [0.55,0.09])
-        offlineDf = addHisFeas(offlineDf, df)
-        offlineDf = pd.concat([offlineDf,copyDf], ignore_index=True)
-        # trainDf = addTrainTiming(offlineDf[offlineDf.flag==0])
-        # testDf = addHisFeas(offlineDf[offlineDf.flag!=0], df)
-        # offlineDf = pd.concat([trainDf,testDf], ignore_index=True)
+        trainDf = addTrainTiming(offlineDf[offlineDf.flag==0])
+        testDf = addHisFeas(offlineDf[offlineDf.flag!=0], df)
+        offlineDf = pd.concat([trainDf,testDf], ignore_index=True)
         exportResult(offlineDf, FEA_OFFLINE_FILE)
         print('offline dataset ready')
     else:
@@ -189,12 +200,9 @@ def main():
         statDf = pd.concat([df,validDf], ignore_index=True)
 
         onlineDf = addGlobalFeas(onlineDf, statDf)
-        copyDf = makeNewDf(onlineDf[onlineDf.flag==0], statDf, [0.31,0.24])
-        onlineDf = addHisFeas(onlineDf, statDf)
-        onlineDf = pd.concat([onlineDf,copyDf], ignore_index=True)
-        # trainDf = addTrainTiming(onlineDf[onlineDf.flag>=0])
-        # testDf = addHisFeas(onlineDf[onlineDf.flag<0], statDf)
-        # onlineDf = pd.concat([trainDf,testDf], ignore_index=True)
+        trainDf = addTrainTiming(onlineDf[onlineDf.flag>=0])
+        testDf = addHisFeas(onlineDf[onlineDf.flag<0], statDf)
+        onlineDf = pd.concat([trainDf,testDf], ignore_index=True)
         exportResult(onlineDf, FEA_ONLINE_FILE)
     else:
         onlineDf = pd.read_csv(FEA_ONLINE_FILE)
@@ -217,23 +225,22 @@ def main():
     print("model dataset prepare: finished!")
 
     # 线下数据集
-    copyIdx = offlineDf[offlineDf.flag==2].sample(frac=0.3, random_state=0).index.tolist()
     trainIdx = offlineDf[offlineDf.flag==0].index.tolist()
     validIdx = offlineDf[offlineDf.flag==1].index.tolist()
-    trainX = offlineDf.loc[trainIdx+copyIdx][fea]
+    trainX = offlineDf.loc[trainIdx][fea]
     trainX.index = list(range(len(trainX)))
-    trainy = offlineDf.loc[trainIdx+copyIdx]['label'].values
+    trainy = offlineDf.loc[trainIdx]['label'].values
     print('train:',trainX.shape, trainy.shape)
     validX = offlineDf.loc[validIdx][fea]
     validX.index = list(range(len(validX)))
     validy = offlineDf.loc[validIdx]['label'].values
     print('valid:',validX.shape, validy.shape)
     # 线上训练集
-    copyIdx = onlineDf[onlineDf.flag==2].sample(frac=0.15, random_state=0).index.tolist()
+    trainIdx = onlineDf[onlineDf.flag.isin([0,1])].index.tolist()
     testIdx = onlineDf[onlineDf.flag==-1].index.tolist()
-    dfX = onlineDf.loc[trainIdx + validIdx + copyIdx][fea]
+    dfX = onlineDf.loc[trainIdx][fea]
     dfX.index = list(range(len(dfX)))
-    dfy = onlineDf.loc[trainIdx + validIdx + copyIdx]['label'].values
+    dfy = onlineDf.loc[trainIdx]['label'].values
     print('df:',dfX.shape, dfy.shape)
     testX = onlineDf.loc[testIdx].sort_values(by=['order'])[fea]
     testX.index = list(range(len(testX)))
@@ -242,29 +249,42 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_split_onoff"
+    modelName = "lgb1_5fold"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
     iterList = []
     thrList = []
+    aucList = []
+    f1List = []
     for rd in range(3):
-        iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd})
+        iterNum = model.train(trainX.values, trainy, validX=validX, validy=validy, params={'seed':rd})
+        # iterNum = model.train(trainX.values, trainy, params={'seed':rd, 'learning_rate': 0.08}, verbose=10)
         iterList.append(iterNum)
-        # 计算F1值
         validX['predy'] = model.predict(validX)
-        thr = findF1Threshold(validX['predy'], validy)
+        # 计算AUC
+        fpr, tpr, thresholds = metrics.roc_curve(validy, validX['predy'], pos_label=1)
+        auc = metrics.auc(fpr, tpr)
+        print('valid auc:', auc)
+        aucList.append(auc)
+        # 计算F1值
+        thr = model.thr
         thrList.append(thr)
-        print('F1阈值：', thr, '验证集f1分数：', metrics.f1_score(validy, getPredLabel(validX['predy'], thr)))
         validX['predyLabel'] = getPredLabel(validX['predy'], thr)
+        f1 = metrics.f1_score(validy, validX['predyLabel'])
+        f1List.append(f1)
+        print('F1阈值：', thr, '验证集f1分数：', f1)
         print(validX[['predy','predyLabel']].describe())
         print(validX.groupby('prefix_newVal')[['predy','predyLabel']].mean())
         print(validX.groupby('title_newVal')[['predy','predyLabel']].mean())
     print('迭代次数：',iterList, '平均：', np.mean(iterList))
     print('F1阈值：',thrList, '平均：', np.mean(thrList))
+    print('auc：', aucList, '平均：', np.mean(aucList))
+    print('F1：', f1List, '平均：', np.mean(f1List))
     # 正式模型
     model.thr = np.mean(thrList)
-    model.train(dfX, dfy, num_round=int(np.mean(iterList)), verbose=False)
+    model.train(dfX.values, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
+    # model.train(dfX.values, dfy, verbose=10, params={'learning_rate': 0.08})
     model.feaScore()
     model.save(modelName)
 
