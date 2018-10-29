@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split, KFold, GridSearchCV, Strat
 from sklearn.externals import joblib
 
 from utils import *
-from fea1 import addGlobalFeas, addHisFeas
+from fea1 import getFeaDf
 
 
 class LgbModel:
@@ -117,45 +117,6 @@ class LgbModel:
             resultDf['metric_mean'] = list(map(lambda x: getEval({k: x}), v))
         exit()
 
-def makeNewDf(df, statDf, ratio=[0.4,0.2]):
-    '''
-    构造无历史记录数据集：打乱df后按比例分为3种情况处理
-    '''
-    df = df.sample(frac=1, random_state=0)
-    df['flag'] = 2
-    prefixNum = round(len(df) * ratio[0])
-    titleNum = round(len(df) * ratio[1])
-
-    # 新prefix旧title
-    prefixDf = df.iloc[:prefixNum]
-    tempDf = statDf.copy()
-    tempDf['prefix'] = np.nan
-    prefixDf = addHisFeas(prefixDf, tempDf)
-    # 新title旧prefix
-    titleDf = df.iloc[prefixNum:prefixNum+titleNum]
-    tempDf = statDf.copy()
-    tempDf['title'] = np.nan
-    titleDf = addHisFeas(titleDf, tempDf)
-    # title和prefix都是新的
-    bothDf = df.iloc[prefixNum+titleNum:]
-    tempDf = statDf.copy()
-    tempDf['prefix'] = tempDf['title'] = np.nan
-    bothDf = addHisFeas(bothDf, tempDf)
-    df = pd.concat([prefixDf,titleDf,bothDf], ignore_index=True)
-    return df
-
-def addTrainTiming(df, nFold=5):
-    '''
-    分批构造训练集历史特征
-    '''
-    kf = StratifiedKFold(n_splits=nFold, random_state=0, shuffle=True)
-    dfList = []
-    for i, (statIdx, taskIdx) in enumerate(kf.split(df.values, df['label'].values)):
-        tempDf = addHisFeas(df.iloc[taskIdx], df.iloc[statIdx])
-        dfList.append(tempDf)
-    df = pd.concat(dfList, ignore_index=True)
-    return df
-
 def main():
     ORIGIN_DATA_PATH = "../data/"
     FEA_OFFLINE_FILE = "../temp/fea_offline.csv"
@@ -163,49 +124,35 @@ def main():
     RESULT_PATH = "../result/"
 
     # 获取线下特征工程数据集
-    if not os.path.isfile(FEA_OFFLINE_FILE):
-        df = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        df['order'] = list(range(len(df)))
-        df['flag'] = 0
+    if os.path.isfile(FEA_OFFLINE_FILE):
+        offlineDf = pd.read_csv(FEA_OFFLINE_FILE)
+        offlineDf['prefix_isin_title'] = (offlineDf['prefix_isin_title']>0).astype(int)
+    else:
+        trainDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
         validDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        validDf['order'] = list(range(len(validDf)))
-        validDf['flag'] = 1
-        testADf = importDf(ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt", colNames=['prefix','query_prediction','title','tag'])
-        testADf['order'] = list(range(len(testADf)))
-        testADf['flag'] = -1
-        statDf = pd.concat([df,validDf], ignore_index=True)
-        offlineDf = pd.concat([df,validDf,testADf], ignore_index=True)
-
-        offlineDf = addGlobalFeas(offlineDf, df)
-        trainDf = addTrainTiming(offlineDf[offlineDf.flag==0])
-        testDf = addHisFeas(offlineDf[offlineDf.flag!=0], df)
-        offlineDf = pd.concat([trainDf,testDf], ignore_index=True)
+        trainDf, validDf = getFeaDf(trainDf, validDf)
+        trainDf['flag'] = 0
+        validDf['flag'] = -1
+        offlineDf = pd.concat([trainDf, validDf])
+        offlineDf.index = list(range(len(offlineDf)))
         exportResult(offlineDf, FEA_OFFLINE_FILE)
         print('offline dataset ready')
-    else:
-        offlineDf = pd.read_csv(FEA_OFFLINE_FILE)
-    # 获取线上特征工程数据集
-    if not os.path.isfile(FEA_ONLINE_FILE):
-        df = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        df['order'] = list(range(len(df)))
-        df['flag'] = 0
-        validDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        validDf['order'] = list(range(len(validDf)))
-        validDf['flag'] = 1
-        testADf = importDf(ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt", colNames=['prefix','query_prediction','title','tag'])
-        testADf['order'] = list(range(len(testADf)))
-        testADf['flag'] = -1
-        statDf = pd.concat([df,validDf], ignore_index=True)
-        onlineDf = pd.concat([df,validDf,testADf], ignore_index=True)
-        statDf = pd.concat([df,validDf], ignore_index=True)
 
-        onlineDf = addGlobalFeas(onlineDf, statDf)
-        trainDf = addTrainTiming(onlineDf[onlineDf.flag>=0])
-        testDf = addHisFeas(onlineDf[onlineDf.flag<0], statDf)
-        onlineDf = pd.concat([trainDf,testDf], ignore_index=True)
-        exportResult(onlineDf, FEA_ONLINE_FILE)
-    else:
+    # 获取线上特征工程数据集
+    if os.path.isfile(FEA_ONLINE_FILE):
         onlineDf = pd.read_csv(FEA_ONLINE_FILE)
+        onlineDf['prefix_isin_title'] = (onlineDf['prefix_isin_title']>0).astype(int)
+    else:
+        tempDf1 = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
+        tempDf2 = importDf(ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
+        df = pd.concat([tempDf1, tempDf2], ignore_index=True)
+        testDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt", colNames=['prefix','query_prediction','title','tag'])
+        df, testDf = getFeaDf(df, testDf)
+        df['flag'] = 0
+        testDf['flag'] = -1
+        onlineDf = pd.concat([df, testDf])
+        onlineDf.index = list(range(len(onlineDf)))
+        exportResult(onlineDf, FEA_ONLINE_FILE)
     print("feature dataset prepare: finished!")
     # exit()
 
@@ -215,6 +162,8 @@ def main():
         'prefix_title_nunique','title_prefix_nunique','prefix_tag_nunique','title_tag_nunique',
         'query_predict_num','query_predict_maxRatio',
         'prefix_newVal','title_newVal',
+        'prefix_len','title_len',
+        'prefix_isin_title',
         'prefix_label_len','title_label_len','tag_label_len','prefix_title_label_len','prefix_tag_label_len','title_tag_label_len',
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
@@ -225,31 +174,27 @@ def main():
     print("model dataset prepare: finished!")
 
     # 线下数据集
-    trainIdx = offlineDf[offlineDf.flag==0].index.tolist()
-    validIdx = offlineDf[offlineDf.flag==1].index.tolist()
-    trainX = offlineDf.loc[trainIdx][fea]
-    trainX.index = list(range(len(trainX)))
-    trainy = offlineDf.loc[trainIdx]['label'].values
+    trainDf = offlineDf[offlineDf.flag==0].reset_index().drop(['index'],axis=1)
+    validDf = offlineDf[offlineDf.flag==-1].reset_index().drop(['index'],axis=1)
+    trainX = trainDf[fea].values
+    trainy = trainDf['label'].values
     print('train:',trainX.shape, trainy.shape)
-    validX = offlineDf.loc[validIdx][fea]
-    validX.index = list(range(len(validX)))
-    validy = offlineDf.loc[validIdx]['label'].values
+    validX = validDf[fea]
+    validy = validDf['label'].values
     print('valid:',validX.shape, validy.shape)
     # 线上训练集
-    trainIdx = onlineDf[onlineDf.flag.isin([0,1])].index.tolist()
-    testIdx = onlineDf[onlineDf.flag==-1].index.tolist()
-    dfX = onlineDf.loc[trainIdx][fea]
-    dfX.index = list(range(len(dfX)))
-    dfy = onlineDf.loc[trainIdx]['label'].values
+    df = onlineDf[onlineDf.flag==0].reset_index().drop(['index'],axis=1)
+    testDf = onlineDf[onlineDf.flag==-1].reset_index().drop(['index'],axis=1)
+    dfX = df[fea].values
+    dfy = df['label'].values
     print('df:',dfX.shape, dfy.shape)
-    testX = onlineDf.loc[testIdx].sort_values(by=['order'])[fea]
-    testX.index = list(range(len(testX)))
+    testX = testDf[fea].values
     print('test:',testX.shape)
-    print(dfX.count())
+    print(df[fea].count())
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_5fold"
+    modelName = "lgb1_isin"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -258,44 +203,41 @@ def main():
     aucList = []
     f1List = []
     for rd in range(3):
-        iterNum = model.train(trainX.values, trainy, validX=validX, validy=validy, params={'seed':rd})
-        # iterNum = model.train(trainX.values, trainy, params={'seed':rd, 'learning_rate': 0.08}, verbose=10)
+        iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd}, verbose=2)
         iterList.append(iterNum)
-        validX['predy'] = model.predict(validX)
+        validDf['pred'] = model.predict(validX)
         # 计算AUC
-        fpr, tpr, thresholds = metrics.roc_curve(validy, validX['predy'], pos_label=1)
+        fpr, tpr, thresholds = metrics.roc_curve(validy, validDf['pred'], pos_label=1)
         auc = metrics.auc(fpr, tpr)
         print('valid auc:', auc)
         aucList.append(auc)
         # 计算F1值
         thr = model.thr
         thrList.append(thr)
-        validX['predyLabel'] = getPredLabel(validX['predy'], thr)
-        f1 = metrics.f1_score(validy, validX['predyLabel'])
+        validDf['predLabel'] = getPredLabel(validDf['pred'], thr)
+        f1 = metrics.f1_score(validy, validDf['predLabel'])
         f1List.append(f1)
         print('F1阈值：', thr, '验证集f1分数：', f1)
-        print(validX[['predy','predyLabel']].describe())
-        print(validX.groupby('prefix_newVal')[['predy','predyLabel']].mean())
-        print(validX.groupby('title_newVal')[['predy','predyLabel']].mean())
+        print(validDf[['pred','predLabel']].describe())
+        print(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
+        print(validDf.groupby('title_newVal')[['pred','predLabel']].mean())
     print('迭代次数：',iterList, '平均：', np.mean(iterList))
     print('F1阈值：',thrList, '平均：', np.mean(thrList))
     print('auc：', aucList, '平均：', np.mean(aucList))
     print('F1：', f1List, '平均：', np.mean(f1List))
     # 正式模型
     model.thr = np.mean(thrList)
-    model.train(dfX.values, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
-    # model.train(dfX.values, dfy, verbose=10, params={'learning_rate': 0.08})
+    model.train(dfX, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
     model.feaScore()
     model.save(modelName)
 
     # 预测结果
-    predictDf = onlineDf[onlineDf.flag==-1]
-    predictDf['predicted_score'] = model.predict(testX)
-    predictDf['predicted_label'] = getPredLabel(predictDf['predicted_score'], model.thr)
-    print(predictDf[['predicted_score','predicted_label']].describe())
-    print(predictDf.groupby('prefix_newVal')[['predicted_score','predicted_label']].mean())
-    print(predictDf.groupby('title_newVal')[['predicted_score','predicted_label']].mean())
-    exportResult(predictDf[['predicted_label']], RESULT_PATH + "%s.csv"%modelName, header=False)
+    testDf['pred'] = model.predict(testX)
+    testDf['predLabel'] = getPredLabel(testDf['pred'], model.thr)
+    print(testDf[['pred','predLabel']].describe())
+    print(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
+    print(testDf.groupby('title_newVal')[['pred','predLabel']].mean())
+    exportResult(testDf[['predLabel']], RESULT_PATH + "%s.csv"%modelName, header=False)
 
 if __name__ == '__main__':
     startTime = datetime.now()

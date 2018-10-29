@@ -14,6 +14,7 @@ import json, random
 from sklearn.preprocessing import *
 from sklearn.model_selection import train_test_split, KFold, GridSearchCV, StratifiedKFold
 
+import jieba
 
 # 导入数据
 def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None):
@@ -127,6 +128,28 @@ def findF1Threshold(predictList, labelList):
     averThr = f1Df.head(5).sort_values(by=['thr']).head(4)['thr'].mean()    # 取前5，去掉最大阈值后取平均
     # print('tops 5 thr:\n', f1Df.head(5),'aver thr:',averThr)
     return averThr
+
+def getStrSeg(str, stopWordList):
+    '''
+    对文本分词，统一大小写并去除停用词
+    '''
+    cutList = jieba.cut_for_search(str.lower())
+    wordList = []
+    for word in cutList:
+        if len(word)<1 or (word in stopWordList):
+            continue
+        wordList.append(word)
+    return wordList
+
+def strList2SegList(strList, stopWordList):
+    '''
+    对文本数组批量进行分词操作
+    '''
+    returnList = []
+    for str in strList:
+        segList = getStrSeg(str, stopWordList)
+        returnList.append(segList)
+    return returnList
 
 # 导出预测结果
 def exportResult(df, filePath, header=True, index=False, sep=','):
