@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split, KFold, GridSearchCV, Strat
 from sklearn.externals import joblib
 
 from utils import *
-from fea1 import getFeaDf
+from fea1 import FeaFactory
 
 
 class LgbModel:
@@ -119,40 +119,19 @@ class LgbModel:
 
 def main():
     ORIGIN_DATA_PATH = "../data/"
-    FEA_OFFLINE_FILE = "../temp/fea_offline.csv"
-    FEA_ONLINE_FILE = "../temp/fea_online.csv"
+    # FEA_OFFLINE_FILE = "../temp/fea_offline.csv"
+    # FEA_ONLINE_FILE = "../temp/fea_online.csv"
     RESULT_PATH = "../result/"
 
     # 获取线下特征工程数据集
-    if os.path.isfile(FEA_OFFLINE_FILE):
-        offlineDf = pd.read_csv(FEA_OFFLINE_FILE)
-        offlineDf['prefix_isin_title'] = (offlineDf['prefix_isin_title']>0).astype(int)
-    else:
-        trainDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        validDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        trainDf, validDf = getFeaDf(trainDf, validDf)
-        trainDf['flag'] = 0
-        validDf['flag'] = -1
-        offlineDf = pd.concat([trainDf, validDf])
-        offlineDf.index = list(range(len(offlineDf)))
-        exportResult(offlineDf, FEA_OFFLINE_FILE)
-        print('offline dataset ready')
-
-    # 获取线上特征工程数据集
-    if os.path.isfile(FEA_ONLINE_FILE):
-        onlineDf = pd.read_csv(FEA_ONLINE_FILE)
-        onlineDf['prefix_isin_title'] = (onlineDf['prefix_isin_title']>0).astype(int)
-    else:
-        tempDf1 = importDf(ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        tempDf2 = importDf(ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt", colNames=['prefix','query_prediction','title','tag','label'])
-        df = pd.concat([tempDf1, tempDf2], ignore_index=True)
-        testDf = importDf(ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt", colNames=['prefix','query_prediction','title','tag'])
-        df, testDf = getFeaDf(df, testDf)
-        df['flag'] = 0
-        testDf['flag'] = -1
-        onlineDf = pd.concat([df, testDf])
-        onlineDf.index = list(range(len(onlineDf)))
-        exportResult(onlineDf, FEA_ONLINE_FILE)
+    dfFile = {
+        'train': ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt",
+        'valid': ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt",
+        'testA': ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
+    }
+    factory = FeaFactory(dfFile, name='fea_new', cachePath="../temp/")
+    offlineDf = factory.getOfflineDf()
+    onlineDf = factory.getOnlineDf()
     print("feature dataset prepare: finished!")
     # exit()
 
@@ -163,10 +142,12 @@ def main():
         'query_predict_num','query_predict_maxRatio',
         'prefix_newVal','title_newVal',
         'prefix_len','title_len',
-        'prefix_isin_title',
+        'prefix_isin_title','prefix_in_title_ratio',
         'prefix_label_len','title_label_len','tag_label_len','prefix_title_label_len','prefix_tag_label_len','title_tag_label_len',
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
+        'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr',
+        'query_title_aver_cosine','query_title_aver_l2','query_title_maxRatio_cosine','query_title_min_cosine',
         ]
     offlineDf = labelEncoding(offlineDf, cateFea)
     onlineDf = labelEncoding(onlineDf, cateFea)
@@ -174,8 +155,8 @@ def main():
     print("model dataset prepare: finished!")
 
     # 线下数据集
-    trainDf = offlineDf[offlineDf.flag==0].reset_index().drop(['index'],axis=1)
-    validDf = offlineDf[offlineDf.flag==-1].reset_index().drop(['index'],axis=1)
+    trainDf = offlineDf[offlineDf.flag==0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
+    validDf = offlineDf[offlineDf.flag==1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     trainX = trainDf[fea].values
     trainy = trainDf['label'].values
     print('train:',trainX.shape, trainy.shape)
@@ -183,8 +164,8 @@ def main():
     validy = validDf['label'].values
     print('valid:',validX.shape, validy.shape)
     # 线上训练集
-    df = onlineDf[onlineDf.flag==0].reset_index().drop(['index'],axis=1)
-    testDf = onlineDf[onlineDf.flag==-1].reset_index().drop(['index'],axis=1)
+    df = onlineDf[onlineDf.flag>=0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
+    testDf = onlineDf[onlineDf.flag==-1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     dfX = df[fea].values
     dfy = df['label'].values
     print('df:',dfX.shape, dfy.shape)
@@ -194,7 +175,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_isin"
+    modelName = "lgb1_addDist"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)

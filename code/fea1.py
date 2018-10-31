@@ -16,19 +16,21 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_selection import chi2, SelectPercentile
 import jieba
 from gensim.corpora import Dictionary
+from gensim.utils import SaveLoad
+import Levenshtein
 # from gensim.models import *
 
 from utils import *
+from nlp import *
 
-jieba.load_userdict("../data/user_dict.dat")
-STOP_WORDS = [w.replace('\n','') for w in open("../data/user_stopwords.dat", 'r', encoding='utf-8').readlines()]
+pd.set_option('display.max_columns',10)
 
+# STOP_WORDS = [w.replace('\n','') for w in open("../data/user_stopwords.dat", 'r', encoding='utf-8').readlines()]
 
 def formatQuery(df):
     '''
     格式化预测词字段
     '''
-    startTime = datetime.now()
     tempDf = df[['prefix','query_prediction']].drop_duplicates(subset='prefix')
     def format(x):
         x = eval(x)
@@ -38,20 +40,18 @@ def formatQuery(df):
     tempDf['query_predict_num'] = tempDf['query_prediction'].map(lambda x: len(x))
     tempDf.loc[tempDf.query_predict_num==0, 'query_prediction'] = np.nan
     tempDf['query_word'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.keys()))
+    tempDf['query_ratio'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.values()))
     df = df.drop(['query_prediction'], axis=1).merge(tempDf, how='left', on=['prefix'])
-    print('format query time:', datetime.now() - startTime)
     return df
 
 def addQueryFea(df):
     '''
     提取搜索词字段特征
     '''
-    startTime = datetime.now()
     tempDf = df[['prefix','query_prediction']].drop_duplicates(subset='prefix')
     tempDf['query_predict_maxRatio'] = tempDf['query_prediction'].dropna().map(lambda x: max(list(x.values())))
     tempDf['query_predict_max'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.keys())[list(x.values()).index(max(list(x.values())))])
     df = df.merge(tempDf.drop(['query_prediction'], axis=1), how='left', on=['prefix'])
-    print('query fea time:', datetime.now() - startTime)
     return df
 
 def addTextLenFea(df):
@@ -66,33 +66,32 @@ def addPrefixIsinTitle(df):
     '''
     title中是否包含了prefix
     '''
-    startTime = datetime.now()
-    df['prefix_isin_title'] = df[['prefix_seg','title']].dropna().apply(lambda x: np.mean([1 if x.title.lower().find(w)>=0 else 0 for w in x.prefix_seg]), axis=1)
-    print('prefix in title cost time:', datetime.now() - startTime)
+    df['prefix_isin_title'] = df[['prefix','title']].dropna().apply(lambda x: x.title.lower().find(x.prefix.lower())>=0, axis=1).astype(int)
+    df['prefix_in_title_ratio'] = df[['prefix_seg','title']].dropna().apply(lambda x: np.mean([1 if x.title.lower().find(w)>=0 else 0 for w in x.prefix_seg]), axis=1)
     return df
 
-def addColSegList(df):
+def addColSegList(df, stopWordList):
     '''
     将数据集中的文本字段分词
     '''
     startTime = datetime.now()
-    df['prefix_seg'] = df['prefix'].dropna().map(lambda x: getStrSeg(x, STOP_WORDS))
+    df['prefix_seg'] = df['prefix'].dropna().map(lambda x: getStrSeg(x, stopWordList))
     df['temp'] = df['prefix_seg'].dropna().map(lambda x: len(x))
     df.loc[df.temp==0, 'prefix_seg'] = np.nan
     print('prefix cutword time:', datetime.now() - startTime)
 
     startTime = datetime.now()
-    df['title_seg'] = df['title'].dropna().map(lambda x: getStrSeg(x, STOP_WORDS))
+    df['title_seg'] = df['title'].dropna().map(lambda x: getStrSeg(x, stopWordList))
     df['temp'] = df['title_seg'].dropna().map(lambda x: len(x))
     df.loc[df.temp==0, 'title_seg'] = np.nan
     print('title cutword time:', datetime.now() - startTime)
 
     startTime = datetime.now()
-    df['query_seg'] = df['query_word'].dropna().map(lambda x: strList2SegList(x, STOP_WORDS))
+    df['query_seg'] = df['query_word'].dropna().map(lambda x: strList2SegList(x, stopWordList))
     print('query cutword time:', datetime.now() - startTime)
-    return df
+    return df.drop(['temp'],axis=1)
 
-def addColBowList(df, dictionary):
+def addColBowVector(df, dictionary):
     '''
     将文档分词转成词袋向量
     '''
@@ -104,6 +103,63 @@ def addColBowList(df, dictionary):
     startTime = datetime.now()
     df['query_bow'] = df['query_seg'].dropna().map(lambda x: [dictionary.doc2bow(doc) for doc in x])
     print('query bow time:', datetime.now() - startTime)
+    return df
+
+def addTfidfVector(df, tfidfModel):
+    '''
+    将词袋向量转tfidf向量
+    '''
+    startTime = datetime.now()
+    df['prefix_tfidf'] = df['prefix_bow'].dropna().map(lambda x: tfidfModel[x])
+    df['title_tfidf'] = df['title_bow'].dropna().map(lambda x: tfidfModel[x])
+    df['query_tfidf'] = df['query_bow'].dropna().map(lambda x: [tfidfModel[doc] for doc in x])
+    print('tfidf fea time:', datetime.now() - startTime)
+    return df
+
+def addTfidfMatrix(df):
+    '''
+    将搜索词、标题、预测词的tfidf向量拼接成稀疏矩阵
+    '''
+    tempList = []
+    for prefix,title,query in df[['prefix_tfidf','title_tfidf','query_tfidf']].values:
+        vecList = []
+        vecList.append([] if prefix is np.nan else prefix)
+        vecList.append([] if title is np.nan else title)
+        vecList.extend([] if query is np.nan else query)
+        matrix = sparseVec2Matrix(vecList)
+        tempList.append(matrix)
+    df['tfidfMatrix'] = tempList
+    return df
+
+def addPrefixTitleDist(df):
+    '''
+    计算搜索词与标题之间的距离
+    '''
+    startTime = datetime.now()
+    tempDf = df.drop_duplicates(['prefix','title'])
+    tempDf['prefix_title_levenshtein'] = tempDf[['prefix','title']].dropna().apply(lambda x: Levenshtein.distance(x.prefix.lower(), x.title.lower()), axis=1)
+    tempDf['prefix_title_longistStr'] = tempDf[['prefix','title']].dropna().apply(lambda x: len(findLongistSubstr(x.prefix.lower(), x.title.lower())) / len(x.prefix), axis=1)
+    tempDf['prefix_title_cosine'] = tempDf[['prefix_tfidf','title_tfidf']].dropna().apply(lambda x: vectorsDistance([x.prefix_tfidf, x.title_tfidf], metric='cosine')[0,1], axis=1)
+    tempDf['prefix_title_l2'] = tempDf[['prefix_tfidf','title_tfidf']].dropna().apply(lambda x: vectorsDistance([x.prefix_tfidf, x.title_tfidf], metric='l2')[0,1], axis=1)
+    df = df.merge(tempDf[['prefix','title','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_cosine','prefix_title_l2']], 'left', on=['prefix','title'])
+    print('prefix title dist time:', datetime.now() - startTime)
+    return df
+
+def addQueryTitleDist(df):
+    '''
+    计算预测词与标题之间的距离
+    '''
+    startTime = datetime.now()
+    tempDf = df.drop_duplicates(['prefix','title'])
+    tempDf['query_title_cosine'] = tempDf.dropna(subset=['query_tfidf','title_tfidf'])['tfidfMatrix'].map(lambda x: pairwise_distances(x[1:], metric='cosine')[0,1:].tolist())
+    tempDf['query_title_l2'] = tempDf.dropna(subset=['query_tfidf','title_tfidf'])['tfidfMatrix'].map(lambda x: pairwise_distances(x[1:], metric='l2')[0,1:].tolist())
+    tempDf['query_title_min_cosine'] = tempDf['query_title_cosine'].dropna().map(lambda x: min(x))
+    tempDf['query_ratio'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.values()))
+    tempDf['query_title_maxRatio_cosine'] = tempDf[['query_title_cosine','query_ratio','query_predict_maxRatio']].dropna().apply(lambda x: x.query_title_cosine[x.query_ratio.index(x.query_predict_maxRatio)], axis=1)
+    tempDf['query_title_aver_cosine'] = tempDf[['query_title_cosine','query_ratio']].dropna().apply(lambda x: np.sum(np.array(x.query_title_cosine)*np.array(x.query_ratio)) / np.sum(x.query_ratio), axis=1)
+    tempDf['query_title_aver_l2'] = tempDf[['query_title_l2','query_ratio']].dropna().apply(lambda x: np.sum(np.array(x.query_title_l2)*np.array(x.query_ratio)) / np.sum(x.query_ratio), axis=1)
+    df = df.merge(tempDf[['prefix','title','query_title_cosine','query_title_l2','query_title_min_cosine','query_ratio','query_title_maxRatio_cosine','query_title_aver_cosine','query_title_aver_l2']], 'left', on=['prefix','title'])
+    print('query title dist time:', datetime.now() - startTime)
     return df
 
 def addCrossColNunique(df, statDf, col1, col2, alias=None):
@@ -131,7 +187,7 @@ def addLabelFea(df, statDf, colArr, alias=None):
     if alias is None:
         alias = '_'.join(np.array(colArr).astype(str))
     if statDf[colArr].count().min() == 0:
-        df['%s_label_len'%alias] = df['%s_label_sum'%alias] = np.nan
+        df['%s_label_len'%alias] = df['%s_label_sum'%alias] = 0
         df['%s_label_ratio'%alias] = np.nan
         return df
     if '%s_label_ratio'%alias in statDf.columns:
@@ -144,7 +200,7 @@ def addLabelFea(df, statDf, colArr, alias=None):
         tempDf.loc[:,['len','sum']] /= tempDf[['len','sum']].sum()
         tempDf.columns = ['%s_label_%s'%(alias,x) for x in tempDf.columns]
         df = df.merge(tempDf.reset_index(), 'left', on=colArr)
-        # df.fillna({'%s_label_len'%alias: 0, '%s_label_sum'%alias: 0}, inplace=True)
+        df.fillna({'%s_label_len'%alias: 0, '%s_label_sum'%alias: 0}, inplace=True)
     return df
 
 def addNewValFea(df, statDf, cols):
@@ -176,7 +232,6 @@ def addGlobalFeas(df, statDf=None):
     '''
     添加全局特征
     '''
-    startTime = datetime.now()
     if statDf is None:
         statDf = df
     # 统计交叉维度独立数
@@ -188,24 +243,18 @@ def addGlobalFeas(df, statDf=None):
     ]
     for c1,c2 in crossColList:
         df = addCrossColNunique(df, statDf, c1, c2)
-    df = formatQuery(df)
-    df = addQueryFea(df)
-    df = addTextLenFea(df)
-    df = addColSegList(df)
-    df = addPrefixIsinTitle(df)
-    print('add global fea time:', datetime.now() - startTime)
     return df
 
-def addTextFeas(df):
+def addTextFeas(df, **params):
     '''
     添加文本特征
     '''
-    startTime = datetime.now()
     df = addQueryFea(df)
     df = addTextLenFea(df)
-    df = addColSegList(df)
     df = addPrefixIsinTitle(df)
-    print('add text fea time:', datetime.now() - startTime)
+    df = addTfidfMatrix(df)
+    df = addPrefixTitleDist(df)
+    df = addQueryTitleDist(df)
     return df
 
 def getFeaDf(trainDf, testDf, nFold=5):
@@ -240,12 +289,18 @@ class FeaFactory:
         self.dfFile = dfFile
         self.name = name
         self.dictionary = None
+        self.tfidfModel = None
         self.cachePath = cachePath if cachePath[-1]=="/" else (cachePath+'/')
         self.nfold = nFold
         self.seed = seed
+        self.stopWords = [w.replace('\n','') for w in open("../data/user_stopwords.dat", 'r', encoding='utf-8').readlines()]
+        jieba.load_userdict("../data/user_dict.dat")
 
     def getOriginDf(self, dfName):
-        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label']).head(10000)
+        '''
+        获取原始数据集，添加id列
+        '''
+        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label'])#.head(10000)
         df['prefix'] = df['prefix'].astype(str)
         df['title'] = df['title'].astype(str)
         df['id'] = list(range(len(df)))
@@ -275,65 +330,226 @@ class FeaFactory:
             evalList = ['query_prediction','query_word','prefix_seg','title_seg','query_seg']
             df.loc[:,evalList] = df[evalList].applymap(lambda x: eval(x) if x==x else x)
         else:
+            print('----------split %s text begin---------'%dfName)
             df = self.getFormatDf(dfName)
-            df = addColSegList(df)
+            df = addColSegList(df, self.stopWords)
             exportResult(df, filePath)
+            print('----------split %s text end---------'%dfName)
         return df
 
-    # def loadDictionary(self):
-    #     '''
-    #     加载字典，若字典不存在则建立字典
-    #     '''
-    #     filePath = self.cachePath + '%s_dictionary.txt'%(self.name, dfName)
-    #     if os.path.isfile(dictFile):
-    #         self.dictionary = Dictionary.load_from_text(filePath)
-    #     else:
-    #         docList = []
-    #         for dfName in self.dfFile.keys():
-    #             tempDf = self.getTextSegDf(dfName)
+    def getTfidfVecDf(self, dfName):
+        '''
+        数据集分词文本转tfidf向量
+        '''
+        filePath = self.cachePath + '%s_tfidf_%s.csv'%(self.name, dfName)
+        if os.path.isfile(filePath):
+            df = pd.read_csv(filePath)
+            evalList = ['query_prediction','query_word','prefix_seg','title_seg','query_seg','prefix_bow','title_bow','query_bow','prefix_tfidf','title_tfidf','query_tfidf']
+            df.loc[:,evalList] = df[evalList].applymap(lambda x: eval(x) if x==x else x)
+        else:
+            print('----------calc %s tfidf begin---------'%dfName)
+            df = self.getTextSegDf(dfName)
+            if self.dictionary is None:
+                self.loadDictionary()
+            if self.tfidfModel is None:
+                self.loadTfidfModel()
+            df = addColBowVector(df, self.dictionary)
+            df = addTfidfVector(df, self.tfidfModel)
+            exportResult(df, filePath)
+            print('----------calc %s tfidf end---------'%dfName)
+        return df
+
+    def getDocList(self, dfName):
+        '''
+        获取数据集文本字段的文档列表
+        '''
+        filePath = self.cachePath + '%s_doclist_%s.txt'%(self.name, dfName)
+        if os.path.isfile(filePath):
+            with open(filePath, encoding='utf-8') as fp:
+                docList = [line.replace('\n','').split(" ") for line in fp.readlines()]
+        else:
+            startTime = datetime.now()
+            docList = []
+            df = self.getTextSegDf(dfName)
+            docList.extend(df['title_seg'].dropna().values)
+            df['query_seg'].dropna().map(lambda x:docList.extend(x))
+            docList = [x for x in docList if len(x)>0]
+            saveDocList(docList, filePath)
+            print('make %s doclist time:'%dfName, datetime.now() - startTime)
+        return docList
+
+    def loadDictionary(self):
+        '''
+        加载字典，若字典不存在则建立字典
+        '''
+        filePath = self.cachePath + '%s_dictionary.txt'%self.name
+        if os.path.isfile(filePath):
+            self.dictionary = Dictionary.load_from_text(filePath)
+        else:
+            startTime = datetime.now()
+            docList = []
+            for dfName in self.dfFile.keys():
+                docList.extend(self.getDocList(dfName))
+            self.dictionary = makeDictionary(docList, filePath)
+            self.dictionary.save_as_text(filePath)
+            print('make dictionary time:', datetime.now() - startTime)
+
+    def loadTfidfModel(self):
+        '''
+        加载Tfidf模型，若模型不存在则建立模型
+        '''
+        filePath = self.cachePath + '%s_tfidf.model'%self.name
+        if os.path.isfile(filePath):
+            self.tfidfModel = SaveLoad.load(filePath)
+        else:
+            startTime = datetime.now()
+            docList = []
+            for dfName in self.dfFile.keys():
+                docList.extend(self.getDocList(dfName))
+            if self.dictionary is None:
+                self.loadDictionary()
+            self.tfidfModel = makeTfidfModel(docList, self.dictionary)
+            self.tfidfModel.save(filePath)
+            print('train tfidfModel time:', datetime.now() - startTime)
 
     def getOfflineDf(self):
+        '''
+        获取线下模型特征数据集
+        '''
         if os.path.isfile(self.cachePath + '%s_offline.csv'%self.name):
             return pd.read_csv(self.cachePath + '%s_offline.csv'%self.name)
-
         # 获取规范化数据集
         trainDf = self.getFormatDf('train')
         testDf = self.getFormatDf('valid')
         trainDf['flag'] = 0
         testDf['flag'] = 1
-        offlineDf = pd.concat([trainDf,testDf])
+        offlineDf = pd.concat([trainDf,testDf], ignore_index=True)
 
         # 全局统计特征
         if os.path.isfile(self.cachePath + '%s_offline_global.csv'%self.name):
             globalDf = pd.read_csv(self.cachePath + '%s_offline_global.csv'%self.name)
         else:
-            globalDf = addGlobalFeas(offlineDf, offlineDf)
+            startTime = datetime.now()
+            globalDf = addGlobalFeas(offlineDf, trainDf)
             exportResult(globalDf, self.cachePath + '%s_offline_global.csv'%self.name)
+            print('make offline global time:', datetime.now() - startTime)
         offlineDf = offlineDf.merge(globalDf[['flag','id']+np.setdiff1d(globalDf.columns, offlineDf.columns).tolist()], 'left', on=['flag','id'])
 
         # 历史统计特征
         if os.path.isfile(self.cachePath + '%s_offline_his.csv'%self.name):
             hisDf = pd.read_csv(self.cachePath + '%s_offline_his.csv'%self.name)
         else:
+            startTime = datetime.now()
             hisDf = addHisFeas(testDf, trainDf)
             kf = StratifiedKFold(n_splits=self.nfold, random_state=self.seed, shuffle=True)
             dfList = []
             for i, (statIdx, taskIdx) in enumerate(kf.split(trainDf.values, trainDf['label'].values)):
                 tempDf = addHisFeas(trainDf.iloc[taskIdx], trainDf.iloc[statIdx])
                 dfList.append(tempDf)
-            hisDf = pd.concat(dfList+[hisDf])
+            hisDf = pd.concat(dfList+[hisDf], ignore_index=True)
             exportResult(hisDf, self.cachePath + '%s_offline_his.csv'%self.name)
+            print('make offline his time:', datetime.now() - startTime)
         offlineDf = offlineDf.merge(hisDf[['flag','id']+np.setdiff1d(hisDf.columns, offlineDf.columns).tolist()], 'left', on=['flag','id'])
-        print(offlineDf.info())
 
         # 文本分词特征
-        trainDf = self.getTextSegDf('train')
-        print(trainDf.info())
-        print(trainDf.head())
-        # offlineDf.index = list(range(len(offlineDf)))
-        # exportResult(offlineDf, FEA_OFFLINE_FILE)
-        # print('offline dataset ready')
+        dataList = [['train',0],['valid',1]]
+        textDf = []
+        for dfName,flag in dataList:
+            filePath = self.cachePath + '%s_textFea_%s.csv'%(self.name,dfName)
+            if os.path.isfile(filePath):
+                startTime = datetime.now()
+                tempDf = pd.read_csv(filePath)
+                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2']
+                tempDf.loc[:,evalList] = tempDf[evalList].applymap(lambda x: eval(x) if x==x else x)
+                exportResult(tempDf, filePath)
+                print('change %s textFea time:'%dfName, datetime.now() - startTime)
+            else:
+                print('----------make %s textFea begin----------'%dfName)
+                startTime = datetime.now()
+                tempDf = self.getTfidfVecDf(dfName)
+                tempDf = addTextFeas(tempDf).drop(['prefix_seg','title_seg','query_seg','prefix_bow','title_bow','query_bow','prefix_tfidf','title_tfidf','query_tfidf','tfidfMatrix'],axis=1)
+                exportResult(tempDf, filePath)
+                print('----------make %s textFea end----------'%dfName)
+                print('make %s textFea his time:'%dfName, datetime.now() - startTime)
+            tempDf['flag'] = flag
+            textDf.append(tempDf)
+        textDf = pd.concat(textDf, ignore_index=True)
+        offlineDf = offlineDf.merge(textDf[['flag','id']+np.setdiff1d(textDf.columns, offlineDf.columns).tolist()], 'left', on=['flag','id'])
+
+        print(offlineDf.info())
+        exportResult(offlineDf, self.cachePath + '%s_offline.csv'%self.name)
+        print('offline dataset ready')
         return offlineDf
+
+    def getOnlineDf(self):
+        '''
+        获取线上模型特征数据集
+        '''
+        if os.path.isfile(self.cachePath + '%s_online.csv'%self.name):
+            return pd.read_csv(self.cachePath + '%s_online.csv'%self.name)
+
+        # 获取规范化数据集
+        trainDf = self.getFormatDf('train')
+        validDf = self.getFormatDf('valid')
+        testDf = self.getFormatDf('testA')
+        trainDf['flag'] = 0
+        validDf['flag'] = 1
+        testDf['flag'] = -1
+        statDf = pd.concat([trainDf, validDf], ignore_index=True)
+        onlineDf = pd.concat([trainDf,validDf,testDf], ignore_index=True)
+
+        # 全局统计特征
+        if os.path.isfile(self.cachePath + '%s_online_global.csv'%self.name):
+            globalDf = pd.read_csv(self.cachePath + '%s_online_global.csv'%self.name)
+        else:
+            startTime = datetime.now()
+            globalDf = addGlobalFeas(onlineDf, statDf)
+            exportResult(globalDf, self.cachePath + '%s_online_global.csv'%self.name)
+            print('make online global time:', datetime.now() - startTime)
+        onlineDf = onlineDf.merge(globalDf[['flag','id']+np.setdiff1d(globalDf.columns, onlineDf.columns).tolist()], 'left', on=['flag','id'])
+
+        # 历史统计特征
+        if os.path.isfile(self.cachePath + '%s_online_his.csv'%self.name):
+            hisDf = pd.read_csv(self.cachePath + '%s_online_his.csv'%self.name)
+        else:
+            startTime = datetime.now()
+            hisDf = addHisFeas(testDf, statDf)
+            kf = StratifiedKFold(n_splits=self.nfold, random_state=self.seed, shuffle=True)
+            dfList = []
+            for i, (statIdx, taskIdx) in enumerate(kf.split(statDf.values, statDf['label'].values)):
+                tempDf = addHisFeas(statDf.iloc[taskIdx], statDf.iloc[statIdx])
+                dfList.append(tempDf)
+            hisDf = pd.concat(dfList+[hisDf], ignore_index=True)
+            exportResult(hisDf, self.cachePath + '%s_online_his.csv'%self.name)
+            print('make online his time:', datetime.now() - startTime)
+        onlineDf = onlineDf.merge(hisDf[['flag','id']+np.setdiff1d(hisDf.columns, onlineDf.columns).tolist()], 'left', on=['flag','id'])
+
+        # 文本分词特征
+        dataList = [['train',0],['valid',1],['testA',-1]]
+        textDf = []
+        for dfName,flag in dataList:
+            filePath = self.cachePath + '%s_textFea_%s.csv'%(self.name,dfName)
+            if os.path.isfile(filePath):
+                tempDf = pd.read_csv(filePath)
+                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2']
+                tempDf.loc[:,evalList] = tempDf[evalList].applymap(lambda x: eval(x) if x==x else x)
+            else:
+                print('----------make %s textFea begin----------'%dfName)
+                startTime = datetime.now()
+                tempDf = self.getTfidfVecDf(dfName)
+                tempDf = addTextFeas(tempDf).drop(['prefix_seg','title_seg','query_seg','prefix_bow','title_bow','query_bow','prefix_tfidf','title_tfidf','query_tfidf','tfidfMatrix'],axis=1)
+                exportResult(tempDf, filePath)
+                print('----------make %s textFea end----------'%dfName)
+                print('make %s textFea his time:'%dfName, datetime.now() - startTime)
+            tempDf['flag'] = flag
+            textDf.append(tempDf)
+        textDf = pd.concat(textDf, ignore_index=True)
+        onlineDf = onlineDf.merge(textDf[['flag','id']+np.setdiff1d(textDf.columns, onlineDf.columns).tolist()], 'left', on=['flag','id'])
+
+        print(onlineDf.info())
+        exportResult(onlineDf, self.cachePath + '%s_online.csv'%self.name)
+        print('online dataset ready')
+        return onlineDf
 
 if __name__ == '__main__':
     startTime = datetime.now()
@@ -343,7 +559,7 @@ if __name__ == '__main__':
         'valid': ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt",
         'testA':ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
     }
-    factory = FeaFactory(dfFile, name="fea_test", cachePath="../temp/")
+    factory = FeaFactory(dfFile, name="fea_new", cachePath="../temp/")
     df = factory.getOfflineDf()
-    # print(df.head())
+    df2 = factory.getOnlineDf()
     print('feaFactory time:', datetime.now() - startTime)

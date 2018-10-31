@@ -30,6 +30,28 @@ class NLP:
             for docs in docList:
                 fp.write(" ".join(docs) + "\n")
 
+def getStrSeg(str, stopWordList):
+    '''
+    对文本分词，统一大小写并去除停用词
+    '''
+    cutList = jieba.cut_for_search(str.lower())
+    wordList = []
+    for word in cutList:
+        if len(word)<1 or (word in stopWordList):
+            continue
+        wordList.append(word)
+    return wordList
+
+def strList2SegList(strList, stopWordList):
+    '''
+    对文本数组批量进行分词操作
+    '''
+    returnList = []
+    for str in strList:
+        segList = getStrSeg(str, stopWordList)
+        returnList.append(segList)
+    return returnList
+
 def saveDocList(docList, filepath):
     '''
     保存文档分词
@@ -38,18 +60,16 @@ def saveDocList(docList, filepath):
         for docs in docList:
             fp.write(" ".join(docs) + "\n")
 
-def makeDictionary(docList, dictFile, add=False):
+def makeDictionary(docList, dictFile="", add=False):
     '''
     生成词典
     '''
-    startTime = datetime.now()
     if os.path.isfile(dictFile) and type=='a':
         dictionary = Dictionary.load_from_text(dictFile)
         dictionary.add_documents(docList)
     else:
         dictionary = Dictionary(docList)
-    dictionary.save_as_text(dictFile)
-    print('make dictionary time:', datetime.now() - startTime)
+    # dictionary.save_as_text(dictFile)
     return dictionary
 
 def getDfDoc(df, stopWordList=[]):
@@ -87,6 +107,14 @@ def dfDocRerun(docName="docList_search"):
     saveDocList(docList, EXPORT_PATH + "%s_%s.txt"%(docName,'valid'))
     # print('save segList time:', datetime.now() - startTime)
     return docList
+
+def makeTfidfModel(docList, dictionary):
+    '''
+    训练tfidf模型
+    '''
+    bowList = [dictionary.doc2bow(doc) for doc in docList]
+    tfidfModel = TfidfModel(bowList)
+    return tfidfModel
 
 if __name__ == '__main__':
     ORIGIN_DATA_PATH = "../data/"

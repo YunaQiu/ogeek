@@ -5,6 +5,7 @@ import pandas as pd
 from pandas import Series, DataFrame
 import numpy as np
 from scipy.stats import mode
+from scipy.sparse import csr_matrix
 import csv
 import matplotlib.dates
 import matplotlib.pyplot as plt
@@ -13,6 +14,7 @@ import urllib, urllib.parse, urllib.request
 import json, random
 from sklearn.preprocessing import *
 from sklearn.model_selection import train_test_split, KFold, GridSearchCV, StratifiedKFold
+from sklearn.metrics.pairwise import pairwise_distances
 
 import jieba
 
@@ -129,27 +131,45 @@ def findF1Threshold(predictList, labelList):
     # print('tops 5 thr:\n', f1Df.head(5),'aver thr:',averThr)
     return averThr
 
-def getStrSeg(str, stopWordList):
+def sparseVec2Matrix(sparseVecList):
     '''
-    对文本分词，统一大小写并去除停用词
+    将稀疏向量列表转成标准CSR矩阵
     '''
-    cutList = jieba.cut_for_search(str.lower())
-    wordList = []
-    for word in cutList:
-        if len(word)<1 or (word in stopWordList):
-            continue
-        wordList.append(word)
-    return wordList
+    indptr = [0]
+    indices = []
+    data = []
+    for vec in sparseVecList:
+        for i,v in vec:
+            indices.append(i)
+            data.append(v)
+        indptr.append(len(vec)+indptr[-1])
+    matrix = csr_matrix((data, indices, indptr))
+    return matrix
 
-def strList2SegList(strList, stopWordList):
+def vectorsDistance(sparseVecList, metric='euclidean'):
     '''
-    对文本数组批量进行分词操作
+    计算各稀疏向量之间的距离
     '''
-    returnList = []
-    for str in strList:
-        segList = getStrSeg(str, stopWordList)
-        returnList.append(segList)
-    return returnList
+    matrix = sparseVec2Matrix(sparseVecList)
+    return pairwise_distances(matrix, metric=metric)
+
+def findLongistSubstr(str1, str2):
+    '''
+    寻找最长公共子串
+    '''
+    dp = [([0] * len(str2)) for i in range(len(str1))]
+    maxlen = maxindex = 0
+    for i in range(0, len(str1)):
+        for j in range(0, len(str2)):
+            if str1[i] == str2[j]:
+                if i!=0 and j!=0:
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                if i == 0 or j == 0:
+                    dp[i][j] = 1
+                if dp[i][j] > maxlen:
+                    maxlen = dp[i][j]
+                    maxindex = i + 1 - maxlen
+    return str1[maxindex:maxindex + maxlen]
 
 # 导出预测结果
 def exportResult(df, filePath, header=True, index=False, sep=','):
