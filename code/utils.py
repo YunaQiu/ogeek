@@ -171,6 +171,18 @@ def findLongistSubstr(str1, str2):
                     maxindex = i + 1 - maxlen
     return str1[maxindex:maxindex + maxlen]
 
+def countJaccard(list1, list2, distance=False):
+    '''
+    计算杰卡德距离或相似度
+    '''
+    list1 = np.array(list1)
+    list2 = np.array(list2)
+    similar = len(np.intersect1d(list1, list2)) / len(np.union1d(list1,list2))
+    if distance:
+        return 1 - similar
+    else:
+        return similar
+
 # 导出预测结果
 def exportResult(df, filePath, header=True, index=False, sep=','):
     df.to_csv(filePath, sep=sep, header=header, index=index)

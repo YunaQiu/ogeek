@@ -28,14 +28,15 @@ class LgbModel:
             'objective': 'binary',
             'metric': 'auc',
             'learning_rate': 0.02,
-        	'num_leaves': 80,
+        	'num_leaves': 100,
             'max_depth': -1,
-            # 'min_data_in_leaf': 350,
+            'min_data_in_leaf': 50,
             # 'feature_fraction': 0.9,
             'bagging_fraction': 0.9,
-        	'bagging_freq': 3,
+        	'bagging_freq': 1,
             'verbose': 0,
             'seed': 0,
+            'num_threads': 15,
         }
         self.params.update(**params)
         self.feaName = feaName
@@ -104,14 +105,17 @@ class LgbModel:
         paramsGrids = {
             'num_leaves': [20*i for i in range(2,10)],
             # 'max_depth': list(range(8,13)),
-            # 'min_data_in_leaf': [50*i for i in range(2,10)],
-            # 'bagging_fraction': [1-0.05*i for i in range(0,5)],
-            # 'bagging_freq': list(range(0,10)),
+            'min_data_in_leaf': [20*i for i in range(1,10)],
+            'bagging_fraction': [1-0.05*i for i in range(0,5)],
+            'bagging_freq': list(range(0,10)),
 
         }
         def getEval(params):
             iter = self.train(X, y, validX=validX, validy=validy, params=params, verbose=verbose)
-            return metrics.log_loss(validy, self.predict(validX)), iter
+            fpr, tpr, thresholds = metrics.roc_curve(validy, self.predict(validX), pos_label=1)
+            auc = metrics.auc(fpr, tpr)
+            print(params, iter, auc)
+            return auc, iter
         for k,v in paramsGrids.items():
             resultDf = pd.DataFrame({k: v})
             resultDf['metric_mean'] = list(map(lambda x: getEval({k: x}), v))
@@ -119,8 +123,6 @@ class LgbModel:
 
 def main():
     ORIGIN_DATA_PATH = "../data/"
-    # FEA_OFFLINE_FILE = "../temp/fea_offline.csv"
-    # FEA_ONLINE_FILE = "../temp/fea_online.csv"
     RESULT_PATH = "../result/"
 
     # 获取线下特征工程数据集
@@ -142,12 +144,15 @@ def main():
         'query_predict_num','query_predict_maxRatio',
         'prefix_newVal','title_newVal',
         'prefix_len','title_len',
-        'prefix_isin_title','prefix_in_title_ratio',
+        # 'prefix_isin_title','prefix_in_title_ratio',
         'prefix_label_len','title_label_len','tag_label_len','prefix_title_label_len','prefix_tag_label_len','title_tag_label_len',
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
         'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr',
         'query_title_aver_cosine','query_title_aver_l2','query_title_maxRatio_cosine','query_title_min_cosine',
+        # 'query_title_minCosine_predictRatio',
+        # 'query_title_min_l2','query_title_minL2_predictRatio','query_title_maxRatio_l2',
+        # 'prefix_title_jaccard','query_title_min_jaccard','query_title_minJacc_predictRatio','query_title_maxRatio_jacc',
         ]
     offlineDf = labelEncoding(offlineDf, cateFea)
     onlineDf = labelEncoding(onlineDf, cateFea)
@@ -175,7 +180,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_addDist"
+    modelName = "lgb1_select2"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)

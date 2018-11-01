@@ -49,9 +49,12 @@ def addQueryFea(df):
     提取搜索词字段特征
     '''
     tempDf = df[['prefix','query_prediction']].drop_duplicates(subset='prefix')
-    tempDf['query_predict_maxRatio'] = tempDf['query_prediction'].dropna().map(lambda x: max(list(x.values())))
-    tempDf['query_predict_max'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.keys())[list(x.values()).index(max(list(x.values())))])
-    df = df.merge(tempDf.drop(['query_prediction'], axis=1), how='left', on=['prefix'])
+    tempDf['query_ratio'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.values()))
+    tempDf['query_word'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.keys()))
+    tempDf['query_predict_maxRatio_pos'] = tempDf['query_ratio'].dropna().map(lambda x: x.index(max(x)))
+    tempDf['query_predict_maxRatio'] = tempDf['query_ratio'].dropna().map(lambda x: max(x))
+    tempDf['query_predict_max'] = tempDf[['query_word','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_word[int(x.query_predict_maxRatio_pos)], axis=1)
+    df = df.merge(tempDf[['prefix']+np.setdiff1d(tempDf.columns,df.columns).tolist()], how='left', on=['prefix'])
     return df
 
 def addTextLenFea(df):
@@ -141,7 +144,8 @@ def addPrefixTitleDist(df):
     tempDf['prefix_title_longistStr'] = tempDf[['prefix','title']].dropna().apply(lambda x: len(findLongistSubstr(x.prefix.lower(), x.title.lower())) / len(x.prefix), axis=1)
     tempDf['prefix_title_cosine'] = tempDf[['prefix_tfidf','title_tfidf']].dropna().apply(lambda x: vectorsDistance([x.prefix_tfidf, x.title_tfidf], metric='cosine')[0,1], axis=1)
     tempDf['prefix_title_l2'] = tempDf[['prefix_tfidf','title_tfidf']].dropna().apply(lambda x: vectorsDistance([x.prefix_tfidf, x.title_tfidf], metric='l2')[0,1], axis=1)
-    df = df.merge(tempDf[['prefix','title','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_cosine','prefix_title_l2']], 'left', on=['prefix','title'])
+    tempDf['prefix_title_jaccard'] = tempDf[['prefix_seg','title_seg']].dropna().apply(lambda x: countJaccard(x.prefix_seg, x.title_seg, distance=True), axis=1)
+    df = df.merge(tempDf[['prefix','title','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_cosine','prefix_title_l2','prefix_title_jaccard']], 'left', on=['prefix','title'])
     print('prefix title dist time:', datetime.now() - startTime)
     return df
 
@@ -151,14 +155,37 @@ def addQueryTitleDist(df):
     '''
     startTime = datetime.now()
     tempDf = df.drop_duplicates(['prefix','title'])
+    if 'query_ratio' not in tempDf.columns:
+        tempDf['query_ratio'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.values()))
+        tempDf['query_predict_maxRatio_pos'] = tempDf['query_ratio'].dropna().map(lambda x: x.index(max(x)))
+
     tempDf['query_title_cosine'] = tempDf.dropna(subset=['query_tfidf','title_tfidf'])['tfidfMatrix'].map(lambda x: pairwise_distances(x[1:], metric='cosine')[0,1:].tolist())
     tempDf['query_title_l2'] = tempDf.dropna(subset=['query_tfidf','title_tfidf'])['tfidfMatrix'].map(lambda x: pairwise_distances(x[1:], metric='l2')[0,1:].tolist())
+    tempDf['prefix_title_jaccard'] = tempDf[['prefix_seg','title_seg']].dropna().apply(lambda x: countJaccard(x.prefix_seg, x.title_seg, distance=True), axis=1)
+
     tempDf['query_title_min_cosine'] = tempDf['query_title_cosine'].dropna().map(lambda x: min(x))
-    tempDf['query_ratio'] = tempDf['query_prediction'].dropna().map(lambda x: list(x.values()))
-    tempDf['query_title_maxRatio_cosine'] = tempDf[['query_title_cosine','query_ratio','query_predict_maxRatio']].dropna().apply(lambda x: x.query_title_cosine[x.query_ratio.index(x.query_predict_maxRatio)], axis=1)
+    tempDf['query_title_minCosine_pos'] = tempDf['query_title_cosine'].dropna().map(lambda x: x.index(min(x)))
+    tempDf['query_title_minCosine_predictRatio'] = tempDf[['query_title_minCosine_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_minCosine_pos)], axis=1)
+    tempDf['query_title_maxRatio_cosine'] = tempDf[['query_title_cosine','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_title_cosine[int(x.query_predict_maxRatio_pos)], axis=1)
     tempDf['query_title_aver_cosine'] = tempDf[['query_title_cosine','query_ratio']].dropna().apply(lambda x: np.sum(np.array(x.query_title_cosine)*np.array(x.query_ratio)) / np.sum(x.query_ratio), axis=1)
+
+    tempDf['query_title_min_l2'] = tempDf['query_title_l2'].dropna().map(lambda x: min(x))
+    tempDf['query_title_minL2_pos'] = tempDf['query_title_l2'].dropna().map(lambda x: x.index(min(x)))
+    tempDf['query_title_minL2_predictRatio'] = tempDf[['query_title_minL2_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_minL2_pos)], axis=1)
+    tempDf['query_title_maxRatio_l2'] = tempDf[['query_title_l2','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_title_l2[int(x.query_predict_maxRatio_pos)], axis=1)
     tempDf['query_title_aver_l2'] = tempDf[['query_title_l2','query_ratio']].dropna().apply(lambda x: np.sum(np.array(x.query_title_l2)*np.array(x.query_ratio)) / np.sum(x.query_ratio), axis=1)
-    df = df.merge(tempDf[['prefix','title','query_title_cosine','query_title_l2','query_title_min_cosine','query_ratio','query_title_maxRatio_cosine','query_title_aver_cosine','query_title_aver_l2']], 'left', on=['prefix','title'])
+
+    tempDf['query_title_jaccard'] = tempDf[['query_seg','title_seg']].dropna().apply(lambda x: [countJaccard(doc, x.title_seg, distance=True) for doc in x.query_seg], axis=1)
+    tempDf['query_title_min_jaccard'] = tempDf['query_title_jaccard'].dropna().map(lambda x: min(x))
+    tempDf['query_title_min_jaccard_pos'] = tempDf['query_title_jaccard'].dropna().map(lambda x: x.index(min(x)))
+    tempDf['query_title_minJacc_predictRatio'] = tempDf[['query_title_min_jaccard_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_min_jaccard_pos)], axis=1)
+    tempDf['query_title_maxRatio_jacc'] = tempDf[['query_title_jaccard','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_title_jaccard[int(x.query_predict_maxRatio_pos)], axis=1)
+
+    df = df.merge(tempDf[['prefix','title',
+    'query_title_cosine','query_title_l2','query_title_jaccard',
+    'query_title_min_cosine','query_title_minCosine_pos','query_title_minCosine_predictRatio','query_title_maxRatio_cosine','query_title_aver_cosine',
+    'query_title_min_l2','query_title_minL2_pos','query_title_minL2_predictRatio','query_title_maxRatio_l2','query_title_aver_l2',
+    'query_title_min_jaccard','query_title_min_jaccard_pos','query_title_minJacc_predictRatio','query_title_maxRatio_jacc']], 'left', on=['prefix','title'])
     print('query title dist time:', datetime.now() - startTime)
     return df
 
@@ -257,6 +284,33 @@ def addTextFeas(df, **params):
     df = addQueryTitleDist(df)
     return df
 
+def extraTextFeas(df, tfidfDf):
+    if 'query_title_minCosine_predictRatio' not in df.columns:
+        tempDf = df.drop_duplicates(subset=['prefix','title'])
+        tempDf = tempDf.merge(tfidfDf[['id','prefix_seg','query_seg','title_seg']],'left',on='id')
+        tempDf['query_title_minCosine_pos'] = tempDf['query_title_cosine'].dropna().map(lambda x: x.index(min(x)))
+        tempDf['query_title_minCosine_predictRatio'] = tempDf[['query_title_minCosine_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_minCosine_pos)], axis=1)
+
+        tempDf['query_title_min_l2'] = tempDf['query_title_l2'].dropna().map(lambda x: min(x))
+        tempDf['query_title_minL2_pos'] = tempDf['query_title_l2'].dropna().map(lambda x: x.index(min(x)))
+        tempDf['query_title_minL2_predictRatio'] = tempDf[['query_title_minL2_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_minL2_pos)], axis=1)
+        tempDf['query_title_maxRatio_l2'] = tempDf[['query_title_l2','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_title_l2[int(x.query_predict_maxRatio_pos)], axis=1)
+
+        tempDf['prefix_title_jaccard'] = tempDf[['prefix_seg','title_seg']].dropna().apply(lambda x: countJaccard(x.prefix_seg, x.title_seg, distance=True), axis=1)
+        tempDf['query_title_jaccard'] = tempDf[['query_seg','title_seg']].dropna().apply(lambda x: [countJaccard(doc, x.title_seg, distance=True) for doc in x.query_seg], axis=1)
+        tempDf['query_title_min_jaccard_pos'] = tempDf['query_title_jaccard'].dropna().map(lambda x: x.index(min(x)))
+        tempDf['query_title_min_jaccard'] = tempDf['query_title_jaccard'].dropna().map(lambda x: min(x))
+        tempDf['query_title_minJacc_predictRatio'] = tempDf[['query_title_min_jaccard_pos','query_ratio']].dropna().apply(lambda x: x.query_ratio[int(x.query_title_min_jaccard_pos)], axis=1)
+        tempDf['query_title_maxRatio_jacc'] = tempDf[['query_title_jaccard','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_title_jaccard[int(x.query_predict_maxRatio_pos)], axis=1)
+
+        df = df.merge(tempDf[['prefix','title',
+        'query_title_minCosine_pos','query_title_minCosine_predictRatio',
+        'query_title_min_l2','query_title_minL2_pos','query_title_minL2_predictRatio','query_predict_maxRatio_pos','query_title_maxRatio_l2',
+        'prefix_title_jaccard','query_title_jaccard','query_title_min_jaccard_pos','query_title_min_jaccard','query_title_minJacc_predictRatio','query_title_maxRatio_jacc']], 'left', on=['prefix','title'])
+    # print(df.count())
+    # exit()
+    return df
+
 def getFeaDf(trainDf, testDf, nFold=5):
     '''
     对传入的训练集和测试集构造特征
@@ -300,7 +354,7 @@ class FeaFactory:
         '''
         获取原始数据集，添加id列
         '''
-        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label'])#.head(10000)
+        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label']).head(10000)
         df['prefix'] = df['prefix'].astype(str)
         df['title'] = df['title'].astype(str)
         df['id'] = list(range(len(df)))
@@ -417,7 +471,8 @@ class FeaFactory:
         获取线下模型特征数据集
         '''
         if os.path.isfile(self.cachePath + '%s_offline.csv'%self.name):
-            return pd.read_csv(self.cachePath + '%s_offline.csv'%self.name)
+            offlineDf = pd.read_csv(self.cachePath + '%s_offline.csv'%self.name)
+            return offlineDf
         # 获取规范化数据集
         trainDf = self.getFormatDf('train')
         testDf = self.getFormatDf('valid')
@@ -457,12 +512,11 @@ class FeaFactory:
         for dfName,flag in dataList:
             filePath = self.cachePath + '%s_textFea_%s.csv'%(self.name,dfName)
             if os.path.isfile(filePath):
-                startTime = datetime.now()
                 tempDf = pd.read_csv(filePath)
-                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2']
+                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2','query_title_jaccard']
                 tempDf.loc[:,evalList] = tempDf[evalList].applymap(lambda x: eval(x) if x==x else x)
-                exportResult(tempDf, filePath)
-                print('change %s textFea time:'%dfName, datetime.now() - startTime)
+                # tempDf = extraTextFeas(tempDf)
+                # exportResult(tempDf, filePath)
             else:
                 print('----------make %s textFea begin----------'%dfName)
                 startTime = datetime.now()
@@ -486,7 +540,8 @@ class FeaFactory:
         获取线上模型特征数据集
         '''
         if os.path.isfile(self.cachePath + '%s_online.csv'%self.name):
-            return pd.read_csv(self.cachePath + '%s_online.csv'%self.name)
+            onlineDf = pd.read_csv(self.cachePath + '%s_online.csv'%self.name)
+            return onlineDf
 
         # 获取规范化数据集
         trainDf = self.getFormatDf('train')
@@ -531,8 +586,10 @@ class FeaFactory:
             filePath = self.cachePath + '%s_textFea_%s.csv'%(self.name,dfName)
             if os.path.isfile(filePath):
                 tempDf = pd.read_csv(filePath)
-                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2']
+                evalList = ['query_prediction','query_word','query_ratio','query_title_cosine','query_title_l2','query_title_jaccard']
                 tempDf.loc[:,evalList] = tempDf[evalList].applymap(lambda x: eval(x) if x==x else x)
+                # tempDf = extraTextFeas(tempDf)
+                # exportResult(tempDf, filePath)
             else:
                 print('----------make %s textFea begin----------'%dfName)
                 startTime = datetime.now()
