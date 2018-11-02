@@ -82,17 +82,19 @@ class LgbModel:
 
     def save(self, modelName):
         joblib.dump(self.bst, self.modelPath + "%s.pkl"%modelName)
-        fp = open(self.modelPath + "%s_thr.txt"%modelName, "w")
-        fp.write("%.7f"%self.thr)
-        fp.close()
+        with open(self.modelPath + "%s_thr.txt"%modelName, "w") as fp:
+            fp.write("%.7f"%self.thr)
+        with open(self.modelPath + "%s_splitThr.txt"%modelName, "w") as fp:
+            fp.write("%.7f\n%.7f"%tuple(self.splitThr))
 
     def load(self, modelName):
         self.bst = joblib.load(self.modelPath + "%s.pkl"%modelName)
-        fp = open(self.modelPath + "%s_thr.txt"%modelName)
-        try:
+        with open(self.modelPath + "%s_thr.txt"%modelName) as fp:
             self.thr = float(fp.read())
-        finally:
-            fp.close()
+        with open(self.modelPath + "%s_splitThr.txt"%modelName) as fp:
+            self.splitThr = []
+            self.splitThr[0] = float(fp.readline())
+            self.splitThr[1] = float(fp.readline())
 
     def feaScore(self, show=True):
         scoreDf = pd.DataFrame({'fea': self.feaName, 'importance': self.bst.feature_importance()})
@@ -142,17 +144,17 @@ def main():
     numFea = [
         'prefix_title_nunique','title_prefix_nunique','prefix_tag_nunique','title_tag_nunique',
         'query_predict_num','query_predict_maxRatio',
-        'prefix_newVal','title_newVal',
+        'title_newVal','prefix_newVal',
         'prefix_len','title_len',
         # 'prefix_isin_title','prefix_in_title_ratio',
         'prefix_label_len','title_label_len','tag_label_len','prefix_title_label_len','prefix_tag_label_len','title_tag_label_len',
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
-        'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr',
-        'query_title_aver_cosine','query_title_aver_l2','query_title_maxRatio_cosine','query_title_min_cosine',
-        # 'query_title_minCosine_predictRatio',
-        # 'query_title_min_l2','query_title_minL2_predictRatio','query_title_maxRatio_l2',
-        # 'prefix_title_jaccard','query_title_min_jaccard','query_title_minJacc_predictRatio','query_title_maxRatio_jacc',
+        'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_jaccard',
+        'query_title_aver_cosine','query_title_maxRatio_cosine','query_title_min_cosine','query_title_minCosine_predictRatio',
+        # 'query_title_aver_l2','query_title_maxRatio_l2','query_title_min_l2','query_title_minL2_predictRatio',
+        'query_title_aver_jacc','query_title_maxRatio_jacc','query_title_min_jaccard','query_title_minJacc_predictRatio',
+        'query_title_aver_leven','query_title_maxRatio_leven','query_title_min_leven','query_title_minLeven_predictRatio',
         ]
     offlineDf = labelEncoding(offlineDf, cateFea)
     onlineDf = labelEncoding(onlineDf, cateFea)
@@ -180,7 +182,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_select2"
+    modelName = "lgb1_select"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -188,6 +190,9 @@ def main():
     thrList = []
     aucList = []
     f1List = []
+    splitF1List = []
+    thrExistList = []
+    thrNewList = []
     for rd in range(3):
         iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd}, verbose=2)
         iterList.append(iterNum)
@@ -203,16 +208,34 @@ def main():
         validDf['predLabel'] = getPredLabel(validDf['pred'], thr)
         f1 = metrics.f1_score(validy, validDf['predLabel'])
         f1List.append(f1)
-        print('F1阈值：', thr, '验证集f1分数：', f1)
-        print(validDf[['pred','predLabel']].describe())
-        print(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
-        print(validDf.groupby('title_newVal')[['pred','predLabel']].mean())
+
+        # 分开调阈值的情况
+        thrNew = findF1Threshold(validDf[validDf.prefix_newVal==1]['pred'].values,validDf[validDf.prefix_newVal==1]['label'].values)
+        thrNewList.append(thrNew)
+        thrExist = findF1Threshold(validDf[validDf.prefix_newVal==0]['pred'].values,validDf[validDf.prefix_newVal==0]['label'].values)
+        thrExistList.append(thrExist)
+        validDf['predLabel2'] = 0
+        validDf.loc[validDf.prefix_newVal==1,'predLabel2'] = getPredLabel(validDf[validDf.prefix_newVal==1]['pred'], thrNew)
+        validDf.loc[validDf.prefix_newVal==0,'predLabel2'] = getPredLabel(validDf[validDf.prefix_newVal==0]['pred'], thrExist)
+        f1 = metrics.f1_score(validy, validDf['predLabel2'])
+        splitF1List.append(f1)
+
+        print('F1阈值：', thr, '验证集f1分数：', f1List[-1])
+        print('新旧阈值：', thrNew, thrExist, '验证集f1分数：', f1)
+        print(validDf[['pred','predLabel','predLabel2']].describe())
+        print(validDf.groupby('prefix_newVal')[['pred','predLabel','predLabel2']].mean())
+        print(validDf.groupby('title_newVal')[['pred','predLabel','predLabel2']].mean())
+
     print('迭代次数：',iterList, '平均：', np.mean(iterList))
     print('F1阈值：',thrList, '平均：', np.mean(thrList))
+    print('旧数据阈值：', thrExistList, '平均：', np.mean(thrExistList))
+    print('新数据阈值：', thrNewList, '平均：', np.mean(thrNewList))
     print('auc：', aucList, '平均：', np.mean(aucList))
     print('F1：', f1List, '平均：', np.mean(f1List))
+    print('分别选阈值后的F1：', splitF1List, '平均：', np.mean(splitF1List))
     # 正式模型
     model.thr = np.mean(thrList)
+    model.splitThr = [np.mean(thrExistList),np.mean(thrNewList)]
     model.train(dfX, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
     model.feaScore()
     model.save(modelName)
@@ -220,10 +243,14 @@ def main():
     # 预测结果
     testDf['pred'] = model.predict(testX)
     testDf['predLabel'] = getPredLabel(testDf['pred'], model.thr)
-    print(testDf[['pred','predLabel']].describe())
-    print(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
-    print(testDf.groupby('title_newVal')[['pred','predLabel']].mean())
+    testDf['predLabel2'] = 0
+    testDf.loc[testDf.prefix_newVal==1,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==1]['pred'], model.splitThr[1])
+    testDf.loc[testDf.prefix_newVal==0,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==0]['pred'], model.splitThr[0])
+    print(testDf[['pred','predLabel','predLabel2']].describe())
+    print(testDf.groupby('prefix_newVal')[['pred','predLabel','predLabel2']].mean())
+    print(testDf.groupby('title_newVal')[['pred','predLabel','predLabel2']].mean())
     exportResult(testDf[['predLabel']], RESULT_PATH + "%s.csv"%modelName, header=False)
+    exportResult(testDf[['predLabel2']], RESULT_PATH + "%s_thr.csv"%modelName, header=False)
 
 if __name__ == '__main__':
     startTime = datetime.now()
