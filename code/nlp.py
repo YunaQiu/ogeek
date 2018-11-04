@@ -64,7 +64,7 @@ def makeDictionary(docList, dictFile="", add=False):
     '''
     生成词典
     '''
-    if os.path.isfile(dictFile) and type=='a':
+    if os.path.isfile(dictFile) and add:
         dictionary = Dictionary.load_from_text(dictFile)
         dictionary.add_documents(docList)
     else:

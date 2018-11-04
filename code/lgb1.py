@@ -128,15 +128,19 @@ def main():
     RESULT_PATH = "../result/"
 
     # 获取线下特征工程数据集
+    startTime = datetime.now()
     dfFile = {
         'train': ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt",
         'valid': ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt",
         'testA': ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
+        # 'testB': ORIGIN_DATA_PATH + "oppo_testB.txt",
     }
-    factory = FeaFactory(dfFile, name='fea_new', cachePath="../temp/")
+    factory = FeaFactory(dfFile, name='fea1', cachePath="../temp/test2/")
+    # factory.updateDictionary('testB')
     offlineDf = factory.getOfflineDf()
     onlineDf = factory.getOnlineDf()
     print("feature dataset prepare: finished!")
+    print("cost time:", datetime.now() - startTime)
     # exit()
 
     # 特征筛选
@@ -152,7 +156,7 @@ def main():
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
         'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_jaccard',
         'query_title_aver_cosine','query_title_maxRatio_cosine','query_title_min_cosine','query_title_minCosine_predictRatio',
-        # 'query_title_aver_l2','query_title_maxRatio_l2','query_title_min_l2','query_title_minL2_predictRatio',
+        'query_title_aver_l2','query_title_maxRatio_l2','query_title_min_l2','query_title_minL2_predictRatio',
         'query_title_aver_jacc','query_title_maxRatio_jacc','query_title_min_jaccard','query_title_minJacc_predictRatio',
         'query_title_aver_leven','query_title_maxRatio_leven','query_title_min_leven','query_title_minLeven_predictRatio',
         ]
@@ -182,7 +186,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_select"
+    modelName = "lgb1_rebuild2"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -249,6 +253,7 @@ def main():
     print(testDf[['pred','predLabel','predLabel2']].describe())
     print(testDf.groupby('prefix_newVal')[['pred','predLabel','predLabel2']].mean())
     print(testDf.groupby('title_newVal')[['pred','predLabel','predLabel2']].mean())
+    exportResult(testDf[['pred']], RESULT_PATH + "%s_pred.csv"%modelName)
     exportResult(testDf[['predLabel']], RESULT_PATH + "%s.csv"%modelName, header=False)
     exportResult(testDf[['predLabel2']], RESULT_PATH + "%s_thr.csv"%modelName, header=False)
 
