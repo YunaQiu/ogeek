@@ -20,7 +20,11 @@ import jieba
 
 # 导入数据
 def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None):
-    df = pd.read_table(url, names=colNames, header=header, encoding='utf-8', quoting=3)
+    df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3)
+    return df
+
+def importCacheDf(url):
+    df = df = pd.read_csv(url, na_values='', keep_default_na=False)
     return df
 
 # 添加one-hot编码并保留原字段
@@ -143,6 +147,8 @@ def sparseVec2Matrix(sparseVecList):
             indices.append(i)
             data.append(v)
         indptr.append(len(vec)+indptr[-1])
+    if len(data)==0:
+        return np.nan
     matrix = csr_matrix((data, indices, indptr))
     return matrix
 
@@ -188,7 +194,7 @@ def exportResult(df, filePath, header=True, index=False, sep=','):
     df.to_csv(filePath, sep=sep, header=header, index=index)
 
 # 获取stacking下一层数据集
-def getOof(clf, trainX, trainY, testX, nFold=5, stratify=True, verbose=False, random_state=0, weight=None):
+def getOof(clf, trainX, trainY, testX, validX=None, validy=None, nFold=5, stratify=True, verbose=False, random_state=0, **params):
     startTime = datetime.now()
     oofTrain = np.zeros(trainX.shape[0])
     oofTest = np.zeros(testX.shape[0])
@@ -206,7 +212,10 @@ def getOof(clf, trainX, trainY, testX, nFold=5, stratify=True, verbose=False, ra
         #     kfWeight = weight[trainIdx]
         # else:
         #     kfWeight = None
-        clf.train(kfTrainX, kfTrainY, validX=kfTestX, validy=kfTesty, verbose=verbose)
+        if validX is None:
+            clf.train(kfTrainX, kfTrainY, validX=kfTestX, validy=kfTesty, verbose=verbose, **params)
+        else:
+            clf.train(kfTrainX, kfTrainY, validX=validX, validy=validy, verbose=verbose, **params)
         oofTrain[testIdx] = clf.predict(kfTestX)
         oofTestSkf[:,i] = clf.predict(testX)
         print('oof cv %d of %d: finished!' % (i+1, nFold))
@@ -215,6 +224,6 @@ def getOof(clf, trainX, trainY, testX, nFold=5, stratify=True, verbose=False, ra
     return oofTrain, oofTest
 
 if __name__ == '__main__':
-    findF1Threshold([0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65],[0,0,0,0,0,0,1,1,1,1,0,0])
+    print(findF1Threshold([0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65],[0,0,0,0,0,0,1,1,1,1,0,0]))
     # findF1Threshold([0.3,0.6,0.3,0.5,0.2,0.7,0.8],[0,1,0,0,1,1,0])
-    getPredLabel(pd.Series([0.3,0.6,0.3,0.5,0.2,0.7,0.8]), tops=0.3)
+    print(getPredLabel(pd.Series([0.3,0.6,0.3,0.5,0.2,0.7,0.8]), tops=0.3))

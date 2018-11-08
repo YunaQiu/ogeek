@@ -93,8 +93,8 @@ class LgbModel:
             self.thr = float(fp.read())
         with open(self.modelPath + "%s_splitThr.txt"%modelName) as fp:
             self.splitThr = []
-            self.splitThr[0] = float(fp.readline())
-            self.splitThr[1] = float(fp.readline())
+            self.splitThr.append(float(fp.readline()))
+            self.splitThr.append(float(fp.readline()))
 
     def feaScore(self, show=True):
         scoreDf = pd.DataFrame({'fea': self.feaName, 'importance': self.bst.feature_importance()})
@@ -133,12 +133,13 @@ def main():
         'train': ORIGIN_DATA_PATH + "oppo_round1_train_20180929.txt",
         'valid': ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt",
         'testA': ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
-        # 'testB': ORIGIN_DATA_PATH + "oppo_testB.txt",
+        'testB': ORIGIN_DATA_PATH + "oppo_round1_test_B_20181106.txt",
     }
-    factory = FeaFactory(dfFile, name='fea1', cachePath="../temp/test2/")
-    # factory.updateDictionary('testB')
-    offlineDf = factory.getOfflineDf()
-    onlineDf = factory.getOnlineDf()
+    factory = FeaFactory(dfFile, name='fea1', cachePath="../temp/test1/")
+    offlineDf = factory.getOfflineDf(type='all')
+    print('offline dataset ready!')
+    # onlineDf = factory.getOnlineDf()
+    onlineDf = factory.getOnlineDfB(type='all')
     print("feature dataset prepare: finished!")
     print("cost time:", datetime.now() - startTime)
     # exit()
@@ -149,10 +150,10 @@ def main():
         'prefix_title_nunique','title_prefix_nunique','prefix_tag_nunique','title_tag_nunique',
         'query_predict_num','query_predict_maxRatio',
         'title_newVal','prefix_newVal',
-        'prefix_len','title_len',
-        # 'prefix_isin_title','prefix_in_title_ratio',
+        'prefix_len','title_len','prefix_title_len_ratio',#'prefix_title_len_diff',
         'prefix_label_len','title_label_len','tag_label_len','prefix_title_label_len','prefix_tag_label_len','title_tag_label_len',
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
+        # 'prefix_label_ratio2','title_label_ratio2','tag_label_ratio2','prefix_title_label_ratio2','prefix_tag_label_ratio2','title_tag_label_ratio2',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
         'prefix_title_cosine','prefix_title_l2','prefix_title_levenshtein','prefix_title_longistStr','prefix_title_jaccard',
         'query_title_aver_cosine','query_title_maxRatio_cosine','query_title_min_cosine','query_title_minCosine_predictRatio',
@@ -182,11 +183,11 @@ def main():
     print('df:',dfX.shape, dfy.shape)
     testX = testDf[fea].values
     print('test:',testX.shape)
-    print(df[fea].count())
+    print(onlineDf.groupby('flag')[fea].count().T)
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb1_rebuild2"
+    modelName = "lgb1"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -229,7 +230,7 @@ def main():
         print(validDf[['pred','predLabel','predLabel2']].describe())
         print(validDf.groupby('prefix_newVal')[['pred','predLabel','predLabel2']].mean())
         print(validDf.groupby('title_newVal')[['pred','predLabel','predLabel2']].mean())
-
+    # exportResult(validDf[['pred']], RESULT_PATH + "%s_valid.csv"%modelName)
     print('迭代次数：',iterList, '平均：', np.mean(iterList))
     print('F1阈值：',thrList, '平均：', np.mean(thrList))
     print('旧数据阈值：', thrExistList, '平均：', np.mean(thrExistList))
@@ -241,8 +242,8 @@ def main():
     model.thr = np.mean(thrList)
     model.splitThr = [np.mean(thrExistList),np.mean(thrNewList)]
     model.train(dfX, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
-    model.feaScore()
     model.save(modelName)
+    model.feaScore()
 
     # 预测结果
     testDf['pred'] = model.predict(testX)
