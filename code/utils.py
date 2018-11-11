@@ -23,6 +23,7 @@ def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colName
     df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3)
     return df
 
+# 导入中间文件
 def importCacheDf(url):
     df = df = pd.read_csv(url, na_values='', keep_default_na=False)
     return df
