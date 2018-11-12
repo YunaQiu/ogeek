@@ -422,8 +422,30 @@ class FeaFactory:
             docList.extend(df['title_seg'].dropna().values)
             df['query_seg'].dropna().map(lambda x:docList.extend(x))
             docList = [x for x in docList if len(x)>0]
-            saveDocList(docList, filePath)
+            # saveDocList(docList, filePath)
             print('make %s doclist time:'%dfName, datetime.now() - startTime)
+        return docList
+
+    def getDocLists(self):
+        '''
+        获取数据集文本字段的文档列表
+        '''
+        filePath = self.cachePath + '%s_doclist.txt'%(self.name)
+        if os.path.isfile(filePath):
+            with open(filePath, encoding='utf-8') as fp:
+                docList = [line.replace('\n','').split(" ") for line in fp.readlines()]
+        else:
+            startTime = datetime.now()
+            dfList = []
+            for dfName in self.dfFile.keys():
+                dfList.append(self.getTextSegDf(dfName))
+            df = pd.concat(dfList, ignore_index=True)
+            docList = []
+            docList.extend(df.drop_duplicates('title')['title_seg'].dropna().values)
+            df.drop_duplicates('prefix')['query_seg'].dropna().map(lambda x:docList.extend(x))
+            docList = [x for x in docList if len(x)>0]
+            saveDocList(docList, filePath)
+            print('make doclist time:', datetime.now() - startTime)
         return docList
 
     def loadDictionary(self, type='offline'):
@@ -619,6 +641,13 @@ class FeaFactory:
         return onlineDf
 
 if __name__ == '__main__':
+    list1 = [2,23,4,4,2,3]
+    list2 = list1.copy()
+    list2.remove(min(list1))
+    list2.remove(max(list1))
+    print(list1, list2, np.mean(list2))
+    exit()
+
     startTime = datetime.now()
     ORIGIN_DATA_PATH = "../data/"
     dfFile = {
@@ -643,15 +672,3 @@ if __name__ == '__main__':
     # df = factory.getOfflineDf()
     # df3 = factory.getOnlineDfB()
     # print('feaFactory B time:', datetime.now() - startTime)
-    #
-    # dfFile = {
-    #     'train': ORIGIN_DATA_PATH + "oppo_train.txt",
-    #     'valid': ORIGIN_DATA_PATH + "oppo_round1_vali_20180929.txt",
-    #     'testA': ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
-    #     'testB': ORIGIN_DATA_PATH + "oppo_round1_test_A_20180929.txt",
-    # }
-    # factory = FeaFactory(dfFile, name="fea2", cachePath="../temp/")
-    # # factory.updateDictionary('testB')
-    # df = factory.getOfflineDf(type='all')
-    # df3 = factory.getOnlineDfB(type='all')
-    # print('feaFactory B total time:', datetime.now() - startTime)

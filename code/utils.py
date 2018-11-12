@@ -97,6 +97,27 @@ def biasSmooth(aArr, bArr, method='MME', epsilon=0, alpha=None, beta=None):
     resultArr = (aArr+alpha) / (bArr+alpha+beta)
     return resultArr
 
+def removeExtremeMean(floatList, removeMax=1, removeMin=1):
+    '''
+    剔除极值后求均值
+    '''
+    if removeMax < 0 or removeMin < 0:
+        print('[ERROR] invalid extreme range!')
+        exit()
+    meanList = list(floatList).copy()
+    if removeMax < 1:
+        removeMax = int(len(meanList) * removeMax)
+    if removeMin < 1:
+        removeMin = int(len(meanList) * removeMin)
+    if removeMax + removeMin >= len(meanList):
+        print('[ERROR] extreme num out of len!')
+        exit()
+    for i in range(removeMax):
+        meanList.remove(max(meanList))
+    for i in range(removeMin):
+        meanList.remove(min(meanList))
+    return np.mean(meanList)
+
 def getPredLabel(predArr, threshold=None, tops=None):
     '''
     根据阈值返回分类预测结果
@@ -112,13 +133,14 @@ def getPredLabel(predArr, threshold=None, tops=None):
         exit()
     return (predArr>=threshold).astype(int)
 
-def findF1Threshold(predictList, labelList):
+def findF1Threshold(predictList, labelList, thrList=None):
     '''
     寻找F1最佳阈值
     '''
     tempDf = pd.DataFrame({'predict':predictList, 'label':labelList})
     trueNum = len(tempDf[tempDf.label==1])
-    thrList = np.unique(tempDf['predict'])
+    if thrList is None:
+        thrList = np.unique(tempDf['predict'])
     f1List = []
     for thr in thrList:
         tempDf['temp'] = getPredLabel(tempDf['predict'], thr)
@@ -225,6 +247,8 @@ def getOof(clf, trainX, trainY, testX, validX=None, validy=None, nFold=5, strati
     return oofTrain, oofTest
 
 if __name__ == '__main__':
-    print(findF1Threshold([0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65],[0,0,0,0,0,0,1,1,1,1,0,0]))
-    # findF1Threshold([0.3,0.6,0.3,0.5,0.2,0.7,0.8],[0,1,0,0,1,1,0])
-    print(getPredLabel(pd.Series([0.3,0.6,0.3,0.5,0.2,0.7,0.8]), tops=0.3))
+    # temp = [1,3,1,2,4,4,23,4,5,5]
+    # print(temp, removeExtremeMean(temp))
+
+    print(findF1Threshold([0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5,0.55,0.6,0.65],[0,0,0,0,0,0,1,1,1,1,0,0],[0.3+0.01*i for i in range(5)]))
+    # print(getPredLabel(pd.Series([0.3,0.6,0.3,0.5,0.2,0.7,0.8]), tops=0.3))

@@ -28,12 +28,12 @@ class LgbModel:
             'objective': 'binary',
 #             'metric': 'binary_logloss',
             'metric': 'custom',
-            'learning_rate': 0.02,
+            'learning_rate': 0.08,
         	'num_leaves': 100,
             'max_depth': -1,
             'min_data_in_leaf': 50,
             # 'feature_fraction': 0.9,
-            'bagging_fraction': 0.9,
+            'bagging_fraction': 0.95,
         	'bagging_freq': 1,
             'verbose': 0,
             'seed': 0,
@@ -42,7 +42,7 @@ class LgbModel:
         self.params.update(**params)
         self.feaName = feaName
         self.cateFea = cateFea
-        self.thr = 0.4
+        # self.thr = 0.4
         self.modelPath = "./model/"
 
     def custom_eval(self, preds, train_data):
@@ -73,6 +73,7 @@ class LgbModel:
             preTrain = lgb.Dataset(X[trainIdx], label=y[trainIdx], feature_name=self.feaName, categorical_feature=self.cateFea)
             preValid = preTrain.create_valid(X[validIdx], label=y[validIdx])
             bst = lgb.train(trainParam, preTrain, num_boost_round=num_round, valid_sets=[preTrain,preValid], valid_names=['train', 'valid'], feval=self.custom_eval, early_stopping_rounds=early_stopping, verbose_eval=verbose)
+            # self.thr = findF1Threshold(bst.predict(X[validIdx]), y[validIdx])
             num_round = bst.best_iteration
             bst = lgb.train(trainParam, trainData, feval=self.custom_eval, num_boost_round=num_round)
         else:
@@ -94,11 +95,17 @@ class LgbModel:
         joblib.dump(self.bst, self.modelPath + "%s.pkl"%modelName)
         with open(self.modelPath + "%s_thr.txt"%modelName, "w") as fp:
             fp.write("%.7f"%self.thr)
+#         with open(self.modelPath + "%s_splitThr.txt"%modelName, "w") as fp:
+#             fp.write("%.7f\n%.7f"%tuple(self.splitThr))
 
     def load(self, modelName):
         self.bst = joblib.load(self.modelPath + "%s.pkl"%modelName)
         with open(self.modelPath + "%s_thr.txt"%modelName) as fp:
             self.thr = float(fp.read())
+#         with open(self.modelPath + "%s_splitThr.txt"%modelName) as fp:
+#             self.splitThr = []
+#             self.splitThr.append(float(fp.readline()))
+#             self.splitThr.append(float(fp.readline()))
 
     def feaScore(self, show=True):
         scoreDf = pd.DataFrame({'fea': self.feaName, 'importance': self.bst.feature_importance()})
@@ -139,6 +146,10 @@ def main():
         'testA': ORIGIN_DATA_PATH + "data_test.txt",
     }
     factory = FeaFactory(dfFile, name='fea2', cachePath="./temp/")
+#     docList = factory.getDocLists()
+#     print('length of doclist:', len(docList))
+#     exit()
+
     offlineDf = factory.getOfflineDf()
     print('offline dataset ready!')
     onlineDf = factory.getOnlineDf()
@@ -170,8 +181,8 @@ def main():
     print("model dataset prepare: finished!")
 
     # 线下数据集
-    trainDf = offlineDf[offlineDf.flag==0].sort_values(by=['id'])
-    validDf = offlineDf[offlineDf.flag==1].sort_values(by=['id'])
+    trainDf = offlineDf[offlineDf.flag==0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
+    validDf = offlineDf[offlineDf.flag==1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     trainX = trainDf[fea].values
     trainy = trainDf['label'].values
     print('train:',trainX.shape, trainy.shape)
@@ -179,8 +190,8 @@ def main():
     validy = validDf['label'].values
     print('valid:',validX.shape, validy.shape)
     # 线上训练集
-    df = onlineDf[onlineDf.flag>=0].sort_values(by=['id'])
-    testDf = onlineDf[onlineDf.flag==-1].sort_values(by=['id'])
+    df = onlineDf[onlineDf.flag>=0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
+    testDf = onlineDf[onlineDf.flag==-1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     dfX = df[fea].values
     dfy = df['label'].values
     print('df:',dfX.shape, dfy.shape)
@@ -190,7 +201,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb2_old"
+    modelName = "lgb2_new"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -201,7 +212,7 @@ def main():
     splitF1List = []
     thrExistList = []
     thrNewList = []
-    for rd in range(3):
+    for rd in range(5):
 #         trainX = trainDf.sample(frac=0.95, random_state=rd)[fea].values
 #         trainy = trainDf.sample(frac=0.95, random_state=rd)['label'].values
         iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd}, verbose=3)
@@ -223,19 +234,23 @@ def main():
         print(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
         print(validDf.groupby('title_newVal')[['pred','predLabel']].mean())
     # exportResult(validDf[['pred']], RESULT_PATH + "%s_valid.csv"%modelName)
-    print('迭代次数：',iterList, '平均：', np.mean(iterList))
+    print('迭代次数：',iterList, '平均：', removeExtremeMean(iterList))
     print('F1阈值：',thrList, '平均：', np.mean(thrList))
     print('logloss：', loglossList, '平均：', np.mean(loglossList))
     print('F1：', f1List, '平均：', np.mean(f1List))
     # 正式模型
     model.thr = np.mean(thrList)
-    model.train(dfX, dfy, num_round=int(np.mean(iterList)), valid=False, verbose=False)
+#     model.splitThr = [np.mean(thrExistList),np.mean(thrNewList)]
+    model.train(dfX, dfy, num_round=int(removeExtremeMean(iterList)), valid=False, verbose=False)
     model.save(modelName)
     model.feaScore()
 
     # 预测结果
     testDf['pred'] = model.predict(testX)
     testDf['predLabel'] = getPredLabel(testDf['pred'], model.thr)
+#     testDf['predLabel2'] = 0
+#     testDf.loc[testDf.prefix_newVal==1,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==1]['pred'], model.splitThr[1])
+#     testDf.loc[testDf.prefix_newVal==0,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==0]['pred'], model.splitThr[0])
     print(testDf[['pred','predLabel']].describe())
     print(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
     print(testDf.groupby('title_newVal')[['pred','predLabel']].mean())
