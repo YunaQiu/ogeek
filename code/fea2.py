@@ -50,6 +50,7 @@ def addQueryFea(df):
     '''
     tempDf = df[['prefix','query_prediction','query_word','query_ratio']].drop_duplicates(subset='prefix')
     tempDf['query_predict_maxRatio_pos'] = tempDf['query_ratio'].dropna().map(lambda x: x.index(max(x)))
+    # print(tempDf['query_predict_maxRatio_pos'].value_counts())
     tempDf['query_predict_maxRatio'] = tempDf['query_ratio'].dropna().map(lambda x: max(x))
     tempDf['query_predict_max'] = tempDf[['query_word','query_predict_maxRatio_pos']].dropna().apply(lambda x: x.query_word[int(x.query_predict_maxRatio_pos)], axis=1)
     df = df.merge(tempDf[['prefix']+np.setdiff1d(tempDf.columns,df.columns).tolist()], how='left', on=['prefix'])
@@ -319,7 +320,6 @@ def getHisFeaDf(df, nFold=5, newRatio=0.4, random_state=0):
 
     newSampleNum = int(len(oldDf)/(1-newRatio)*newRatio)
     df = pd.concat([oldDf, newDf.sample(n=newSampleNum, random_state=random_state)], ignore_index=True)
-    print(df.shape[0], oldDf.shape[0], newSampleNum)
     return df
 
 def addGlobalFeas(df, statDf=None):
@@ -358,6 +358,7 @@ class FeaFactory:
         self.dictionary = {}
         self.tfidfModel = {}
         self.cachePath = cachePath if cachePath[-1]=="/" else (cachePath+'/')
+        self.textFeaCacheDf = None
         self.nfold = nFold
         self.seed = seed
         self.stopWords = [w.replace('\n','') for w in open("./user_stopwords.dat", 'r', encoding='utf-8').readlines()]
@@ -373,7 +374,7 @@ class FeaFactory:
         格式化原始数据集
         '''
         startTime = datetime.now()
-        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label']).head(20000)
+        df = importDf(self.dfFile[dfName], colNames=['prefix','query_prediction','title','tag','label'])#.head(20000)
         df['prefix'] = df['prefix'].astype(str)
         df['title'] = df['title'].astype(str)
         df['prefix_title'] = df['prefix'] + '_' + df['title']
@@ -523,6 +524,7 @@ class FeaFactory:
         df = addColSegList(df, self.stopWords)
         if 'prefix_title' not in df.columns:
             df['prefix_title'] = df['prefix'].astype(str)+'_'+df['title'].astype(str)
+        oldCols = df.columns.tolist()
         cachePath = self.cachePath + '%s_textFea_%s.csv'%(self.name,type)
         if os.path.isfile(cachePath):
             if self.textFeaCacheDf is None:
@@ -542,7 +544,8 @@ class FeaFactory:
                 print('----------make %d textFea end----------'%tempDf.shape[0])
                 print('make %d new textFea his time:'%tempDf.shape[0], datetime.now() - startTime2)
                 tempList.append(tempDf)
-                addDf = tempDf.drop(['tag','label','id','query_prediction','query_predict_num','query_word','query_ratio'],axis=1).drop_duplicates(['prefix','title'])
+                colList = ['prefix_title','prefix','title'] + np.setdiff1d(tempDf.columns, oldCols).tolist()
+                addDf = tempDf[colList].drop_duplicates(['prefix','title'])
                 totalDf = pd.concat([totalDf,addDf], ignore_index=True)
                 exportResult(totalDf, cachePath)
                 self.textFeaCacheDf = totalDf
@@ -553,7 +556,8 @@ class FeaFactory:
             df = addTextFeas(df).drop(['prefix_seg','title_seg','query_seg'],axis=1)
             print('----------make %d textFea end----------'%df.shape[0])
             print('make %d new textFea his time:'%df.shape[0], datetime.now() - startTime2)
-            totalDf = df.drop(['tag','label','id','query_prediction','query_predict_num','query_word','query_ratio'],axis=1).drop_duplicates(['prefix','title'])
+            colList = ['prefix_title','prefix','title'] + np.setdiff1d(df.columns, oldCols).tolist()
+            totalDf = df[colList].drop_duplicates(['prefix','title'])
             exportResult(totalDf, cachePath)
             self.textFeaCacheDf = totalDf
         # exportResult(df, filePath)
@@ -568,6 +572,7 @@ class FeaFactory:
         filePath = self.cachePath + '%s_offline_stat.csv'%self.name
         if os.path.isfile(filePath):
             offlineDf = importCacheDf(filePath)
+            offlineDf.loc[:,self.formatEval] = offlineDf[self.formatEval].applymap(lambda x: eval(x) if x==x else x)
         else:
             # 获取规范化数据集
             trainDf = self.getFormatDf('train')
@@ -578,8 +583,8 @@ class FeaFactory:
             # 获取历史统计特征
             startTime = datetime.now()
             hisDf = addHisFeas(testDf, trainDf)
-            tempDf = addCvHisFea(trainDf, newRatio=newRatio, random_state=self.seed)
-            # tempDf = getHisFeaDf(trainDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
+            # tempDf = addCvHisFea(trainDf, newRatio=newRatio, random_state=self.seed)
+            tempDf = getHisFeaDf(trainDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
             offlineDf = pd.concat([tempDf,hisDf], ignore_index=True)
             print('prepare offline his time:', datetime.now() - startTime)
 
@@ -591,7 +596,7 @@ class FeaFactory:
 
         # 文本分词特征
         startTime = datetime.now()
-        self.textFeaCacheDf = None
+#         self.textFeaCacheDf = None
         offlineDf = self.getTextFeaDf(offlineDf)
         print('prepare offline textFea time:', datetime.now() - startTime)
 
@@ -606,6 +611,7 @@ class FeaFactory:
         filePath = self.cachePath + '%s_online_stat.csv'%self.name
         if os.path.isfile(filePath):
             onlineDf = importCacheDf(filePath)
+            onlineDf.loc[:,self.formatEval] = onlineDf[self.formatEval].applymap(lambda x: eval(x) if x==x else x)
         else:
             # 获取规范化数据集
             trainDf = self.getFormatDf('train')
@@ -619,8 +625,8 @@ class FeaFactory:
             # 获取历史统计特征
             startTime = datetime.now()
             hisDf = addHisFeas(testDf, statDf)
-            tempDf = addCvHisFea(statDf, newRatio=newRatio, random_state=self.seed)
-            # tempDf = getHisFeaDf(statDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
+            # tempDf = addCvHisFea(statDf, newRatio=newRatio, random_state=self.seed)
+            tempDf = getHisFeaDf(statDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
             onlineDf = pd.concat([tempDf,hisDf], ignore_index=True)
             print('prepare online his time:', datetime.now() - startTime)
 
@@ -632,7 +638,7 @@ class FeaFactory:
 
         # 文本分词特征
         startTime = datetime.now()
-        self.textFeaCacheDf = None
+#         self.textFeaCacheDf = None
         onlineDf = self.getTextFeaDf(onlineDf)
         print('prepare online textFea time:', datetime.now() - startTime)
 

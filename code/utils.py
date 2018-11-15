@@ -25,7 +25,7 @@ def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colName
 
 # 导入中间文件
 def importCacheDf(url):
-    df = df = pd.read_csv(url, na_values='', keep_default_na=False)
+    df = df = pd.read_csv(url, na_values='', keep_default_na=False, float_precision="%.7f")
     return df
 
 # 添加one-hot编码并保留原字段
@@ -153,10 +153,12 @@ def findF1Threshold(predictList, labelList, thrList=None):
         f1 = 2 * precise * recall / (precise + recall)
         f1List.append(f1)
     f1Df = pd.DataFrame({'thr':thrList[:len(f1List)], 'f1':f1List}).sort_values(by=['f1','thr'], ascending=[False,True])
-    bestThs = thrList[f1List.index(max(f1List))]
-    averThr = f1Df.head(5).sort_values(by=['thr']).head(4)['thr'].mean()    # 取前5，去掉最大阈值后取平均
-    # print('tops 5 thr:\n', f1Df.head(5),'aver thr:',averThr)
-    return averThr
+    if thrList is None:
+        averThr = f1Df.head(5).sort_values(by=['thr']).head(4)['thr'].mean()    # 取前5，去掉最大阈值后取平均
+        return averThr
+    else:
+        bestThr = thrList[f1List.index(max(f1List))]
+        return bestThr
 
 def sparseVec2Matrix(sparseVecList):
     '''

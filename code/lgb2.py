@@ -28,7 +28,7 @@ class LgbModel:
             'objective': 'binary',
 #             'metric': 'binary_logloss',
             'metric': 'custom',
-            'learning_rate': 0.08,
+            'learning_rate': 0.05,
         	'num_leaves': 100,
             'max_depth': -1,
             'min_data_in_leaf': 50,
@@ -42,7 +42,7 @@ class LgbModel:
         self.params.update(**params)
         self.feaName = feaName
         self.cateFea = cateFea
-        # self.thr = 0.4
+        self.thr = 0.4
         self.modelPath = "./model/"
 
     def custom_eval(self, preds, train_data):
@@ -50,11 +50,12 @@ class LgbModel:
         自定义F1评价函数
         '''
         labels = train_data.get_label()
-        predLabels = getPredLabel(preds, self.thr)
+        thr = findF1Threshold(preds, labels, np.array(range(360,440,10)) * 0.001)
+        predLabels = getPredLabel(preds, thr)
         f1 = metrics.f1_score(labels, predLabels)
         return 'f1', f1, True
 
-    def train(self, X, y, num_round=8000, valid=0.05, validX=None, validy=None, early_stopping=500, verbose=True, params={}, thr=None):
+    def train(self, X, y, num_round=8000, valid=0.05, validX=None, validy=None, early_stopping=200, verbose=True, params={}, thr=None):
         trainParam = self.params
         trainParam.update(params)
         self.thr = self.thr if thr is None else thr
@@ -201,7 +202,7 @@ def main():
     print('training dataset prepare: finished!')
 
     # 训练模型
-    modelName = "lgb2_new"
+    modelName = "lgb2"
     model = LgbModel(fea)
     # model.load(modelName)
     # model.gridSearch(trainX, trainy, validX, validy)
@@ -224,12 +225,12 @@ def main():
         # 计算F1值
         thr = findF1Threshold(validDf['pred'], validy)
         thrList.append(thr)
-        validDf['predLabel'] = getPredLabel(validDf['pred'], model.thr)
-        validDf['predLabel2'] = getPredLabel(validDf['pred'], thr)
+        validDf['predLabel'] = getPredLabel(validDf['pred'], thr)
+        # validDf['predLabel2'] = getPredLabel(validDf['pred'], thr)
         f1 = metrics.f1_score(validy, validDf['predLabel'])
         f1List.append(f1)
 
-        print('F1阈值：', thr, '验证集f1分数：', f1List[-1], '修正阈值后F1：', metrics.f1_score(validy, validDf['predLabel2']))
+        print('F1阈值：', thr, '验证集f1分数：', f1List[-1])
         print(validDf[['pred','predLabel']].describe())
         print(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
         print(validDf.groupby('title_newVal')[['pred','predLabel']].mean())
@@ -248,15 +249,11 @@ def main():
     # 预测结果
     testDf['pred'] = model.predict(testX)
     testDf['predLabel'] = getPredLabel(testDf['pred'], model.thr)
-#     testDf['predLabel2'] = 0
-#     testDf.loc[testDf.prefix_newVal==1,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==1]['pred'], model.splitThr[1])
-#     testDf.loc[testDf.prefix_newVal==0,'predLabel2'] = getPredLabel(testDf[testDf.prefix_newVal==0]['pred'], model.splitThr[0])
     print(testDf[['pred','predLabel']].describe())
     print(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
     print(testDf.groupby('title_newVal')[['pred','predLabel']].mean())
     exportResult(testDf[['pred']], RESULT_PATH + "%s_pred.csv"%modelName)
     exportResult(testDf[['predLabel']], RESULT_PATH + "%s.csv"%modelName, header=False)
-#     exportResult(testDf[['predLabel2']], RESULT_PATH + "%s_thr.csv"%modelName, header=False)
 
 if __name__ == '__main__':
     startTime = datetime.now()
