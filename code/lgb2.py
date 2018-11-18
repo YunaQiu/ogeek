@@ -8,7 +8,7 @@ from scipy.stats import mode
 from scipy import sparse
 import csv
 from datetime import *
-import json, random, os
+import json, random, os, logging
 
 from sklearn.preprocessing import *
 import lightgbm as lgb
@@ -26,8 +26,8 @@ class LgbModel:
         self.params = {
             'boosting_type': 'gbdt',
             'objective': 'binary',
-#             'metric': 'binary_logloss',
-            'metric': 'custom',
+            'metric': 'binary_logloss',
+            # 'metric': 'custom',
             'learning_rate': 0.05,
         	'num_leaves': 100,
             'max_depth': -1,
@@ -47,13 +47,53 @@ class LgbModel:
 
     def custom_eval(self, preds, train_data):
         '''
-        自定义F1评价函数
+        自定义连续的F1评价函数
         '''
         labels = train_data.get_label()
-        thr = findF1Threshold(preds, labels, np.array(range(360,440,10)) * 0.001)
-        predLabels = getPredLabel(preds, thr)
-        f1 = metrics.f1_score(labels, predLabels)
+        tp = np.sum(labels * preds)
+        fp = np.sum((1-labels)*preds)
+        fn = np.sum(labels*(1-preds))
+
+        p = tp / (tp + fp + 1e-8)
+        r = tp / (tp + fn + 1e-8)
+
+        f1 = 2*p*r / (p + r + 1e-8)
         return 'f1', f1, True
+    #
+    # def custom_eval(self, preds, train_data):
+    #     '''
+    #     改进的F1连续函数
+    #     '''
+    #     labels = train_data.get_label()
+    #     thrRange = [0.05, 0.8]
+    #     halfDiff = (thrRange[1] - thrRange[0]) / 2
+    #     preds = (preds - thrRange[0] - halfDiff) / halfDiff
+    #     preds[(preds<0) & (labels==0)] = 0
+    #     preds[(preds>1) & (labels==1)] = 1
+    #
+    #     tp = np.sum(labels * preds)
+    #     fp = np.sum((1-labels)*preds)
+    #     fn = np.sum(labels*(1-preds))
+    #
+    #     p = tp / (tp + fp + 1e-8)
+    #     r = tp / (tp + fn + 1e-8)
+    #
+    #     f1 = 2*p*r / (p + r + 1e-8)
+    #     return 'f1', f1, True
+    #
+    # def custom_eval(self, preds, train_data):
+    #     '''
+    #     自定义F1评价函数
+    #     '''
+    #     labels = train_data.get_label()
+    #     f1List = []
+    #     for thr in [0.38,0.39,0.4,0.41]:
+    #         # thr = findF1Threshold(preds, labels, np.array(range(360,440,10)) * 0.001)
+    #         predLabels = getPredLabel(preds, thr)
+    #         f1 = metrics.f1_score(labels, predLabels)
+    #         f1List.append(f1)
+    #     f1 = np.mean(f1List)
+    #     return 'f1', f1, True
 
     def train(self, X, y, num_round=8000, valid=0.05, validX=None, validy=None, early_stopping=200, verbose=True, params={}, thr=None):
         trainParam = self.params
@@ -62,7 +102,7 @@ class LgbModel:
         trainData = lgb.Dataset(X, label=y, feature_name=self.feaName, categorical_feature=self.cateFea)
         if validX is not None:
             validData = trainData.create_valid(validX, label=validy)
-            bst = lgb.train(trainParam, trainData, num_boost_round=num_round, valid_sets=[trainData,validData], valid_names=['train', 'valid'], feval=self.custom_eval, early_stopping_rounds=early_stopping, verbose_eval=verbose)#
+            bst = lgb.train(trainParam, trainData, num_boost_round=num_round, valid_sets=[trainData,validData], valid_names=['train', 'valid'], early_stopping_rounds=early_stopping, verbose_eval=verbose)#, feval=self.custom_eval
             # self.thr = findF1Threshold(bst.predict(validX), validy)
         elif (valid is not None) and (valid is not False):
             np.random.seed(seed=trainParam['seed'])
@@ -112,7 +152,7 @@ class LgbModel:
         scoreDf = pd.DataFrame({'fea': self.feaName, 'importance': self.bst.feature_importance()})
         scoreDf.sort_values(['importance'], ascending=False, inplace=True)
         if show:
-            print(scoreDf[scoreDf.importance>0])
+            logging.warning(scoreDf[scoreDf.importance>0])
         return scoreDf
 
     def gridSearch(self, X, y, validX, validy, nFold=5, verbose=0):
@@ -128,7 +168,7 @@ class LgbModel:
             iter = self.train(X, y, validX=validX, validy=validy, params=params, verbose=verbose)
             fpr, tpr, thresholds = metrics.roc_curve(validy, self.predict(validX), pos_label=1)
             auc = metrics.auc(fpr, tpr)
-            print(params, iter, auc)
+            logging.warning('%s %s %s' % (params, iter, auc))
             return auc, iter
         for k,v in paramsGrids.items():
             resultDf = pd.DataFrame({k: v})
@@ -136,7 +176,7 @@ class LgbModel:
         exit()
 
 def main():
-    ORIGIN_DATA_PATH = "../data/oppo_data_ronud2_20181107/"
+    ORIGIN_DATA_PATH = "../data/"#oppo_data_ronud2_20181107/
     RESULT_PATH = "./result/"
 
     # 获取线下特征工程数据集
@@ -148,15 +188,15 @@ def main():
     }
     factory = FeaFactory(dfFile, name='fea2', cachePath="./temp/")
 #     docList = factory.getDocLists()
-#     print('length of doclist:', len(docList))
+#     logging.warning('length of doclist: %s' % len(docList))
 #     exit()
 
     offlineDf = factory.getOfflineDf()
-    print('offline dataset ready!')
+    logging.warning('offline dataset ready!')
     onlineDf = factory.getOnlineDf()
     # onlineDf = factory.getOnlineDfB()
-    print("feature dataset prepare: finished!")
-    print("cost time:", datetime.now() - startTime)
+    logging.warning("feature dataset prepare: finished!")
+    logging.warning("cost time: %s" % (datetime.now() - startTime))
     # exit()
 
     # 特征筛选
@@ -170,36 +210,36 @@ def main():
         'prefix_label_sum','title_label_sum','tag_label_sum','prefix_title_label_sum','prefix_tag_label_sum','title_tag_label_sum',
         # 'prefix_label_ratio2','title_label_ratio2','tag_label_ratio2','prefix_title_label_ratio2','prefix_tag_label_ratio2','title_tag_label_ratio2',
         'prefix_label_ratio','title_label_ratio','tag_label_ratio','prefix_title_label_ratio','prefix_tag_label_ratio','title_tag_label_ratio',
-        'prefix_title_levenshtein','prefix_title_longistStr','prefix_title_jaccard',#'prefix_title_cosine','prefix_title_l2',
-        # 'query_title_aver_cosine','query_title_maxRatio_cosine','query_title_min_cosine','query_title_minCosine_predictRatio',
-        # 'query_title_aver_l2','query_title_maxRatio_l2','query_title_min_l2','query_title_minL2_predictRatio',
-        'query_title_aver_jacc','query_title_maxRatio_jacc','query_title_min_jaccard','query_title_minJacc_predictRatio',
-        'query_title_aver_leven','query_title_maxRatio_leven','query_title_min_leven','query_title_minLeven_predictRatio',
+        'prefix_title_levenshtein','prefix_title_longistStr','prefix_title_jaccard','prefix_title_cosine','prefix_title_wmdis',
+        'query_title_aver_cos','query_title_maxRatio_cos','query_title_max_cos','query_title_maxcos_predictRatio',
+        'query_title_aver_wm','query_title_maxRatio_wm','query_title_min_wm','query_title_minwm_predictRatio',
+        'query_title_aver_jacc','query_title_maxRatio_jacc','query_title_min_jacc','query_title_minjacc_predictRatio',
+        'query_title_aver_leven','query_title_maxRatio_leven','query_title_min_leven','query_title_minleven_predictRatio',
         ]
     offlineDf = labelEncoding(offlineDf, cateFea)
     onlineDf = labelEncoding(onlineDf, cateFea)
     fea = cateFea + numFea
-    print("model dataset prepare: finished!")
+    logging.warning("model dataset prepare: finished!")
 
     # 线下数据集
     trainDf = offlineDf[offlineDf.flag==0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     validDf = offlineDf[offlineDf.flag==1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     trainX = trainDf[fea].values
     trainy = trainDf['label'].values
-    print('train:',trainX.shape, trainy.shape)
+    logging.warning('train: %s %s' % (trainX.shape, trainy.shape))
     validX = validDf[fea]
     validy = validDf['label'].values
-    print('valid:',validX.shape, validy.shape)
+    logging.warning('valid: %s %s' % (validX.shape, validy.shape))
     # 线上训练集
     df = onlineDf[onlineDf.flag>=0].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     testDf = onlineDf[onlineDf.flag==-1].sort_values(by=['id'])#.reset_index().drop(['index'],axis=1)
     dfX = df[fea].values
     dfy = df['label'].values
-    print('df:',dfX.shape, dfy.shape)
+    logging.warning('df: %s %s' % (dfX.shape, dfy.shape))
     testX = testDf[fea].values
-    print('test:',testX.shape)
-    print(onlineDf.groupby('flag')[fea].count().T)
-    print('training dataset prepare: finished!')
+    logging.warning('test: %s' % [testX.shape])
+    logging.warning(repr(onlineDf.groupby('flag')[fea].count().T))
+    logging.warning('training dataset prepare: finished!')
 
     # 训练模型
     modelName = "lgb2"
@@ -219,7 +259,7 @@ def main():
         iterNum = model.train(trainX, trainy, validX=validX, validy=validy, params={'seed':rd}, verbose=3)
         iterList.append(iterNum)
         validDf['pred'] = model.predict(validX)
-        # 计算AUC
+        # 计算logloss
         logloss = metrics.log_loss(validy, validDf['pred'])
         loglossList.append(logloss)
         # 计算F1值
@@ -230,15 +270,17 @@ def main():
         f1 = metrics.f1_score(validy, validDf['predLabel'])
         f1List.append(f1)
 
-        print('F1阈值：', thr, '验证集f1分数：', f1List[-1])
-        print(validDf[['pred','predLabel']].describe())
-        print(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
-        print(validDf.groupby('title_newVal')[['pred','predLabel']].mean())
+        logging.warning('迭代次数： %s' % iterNum)
+        logging.warning('logloss: %s' % logloss)
+        logging.warning('F1阈值：%s 验证集f1分数：%s' % (thr, f1List[-1]))
+        logging.warning(repr(validDf[['pred','predLabel']].describe()))
+        logging.warning(repr(validDf.groupby('prefix_newVal')[['pred','predLabel']].mean()))
+        logging.warning(repr(validDf.groupby('title_newVal')[['pred','predLabel']].mean()))
     # exportResult(validDf[['pred']], RESULT_PATH + "%s_valid.csv"%modelName)
-    print('迭代次数：',iterList, '平均：', removeExtremeMean(iterList))
-    print('F1阈值：',thrList, '平均：', np.mean(thrList))
-    print('logloss：', loglossList, '平均：', np.mean(loglossList))
-    print('F1：', f1List, '平均：', np.mean(f1List))
+    logging.warning('迭代次数：%s 平均：%s' % (iterList, removeExtremeMean(iterList)))
+    logging.warning('F1阈值：%s 平均：%s' % (thrList, np.mean(thrList)))
+    logging.warning('logloss：%s 平均：%s' % (loglossList, np.mean(loglossList)))
+    logging.warning('F1：%s 平均：%s' % (f1List, np.mean(f1List)))
     # 正式模型
     model.thr = np.mean(thrList)
 #     model.splitThr = [np.mean(thrExistList),np.mean(thrNewList)]
@@ -249,13 +291,25 @@ def main():
     # 预测结果
     testDf['pred'] = model.predict(testX)
     testDf['predLabel'] = getPredLabel(testDf['pred'], model.thr)
-    print(testDf[['pred','predLabel']].describe())
-    print(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean())
-    print(testDf.groupby('title_newVal')[['pred','predLabel']].mean())
+    logging.warning(repr(testDf[['pred','predLabel']].describe()))
+    logging.warning(repr(testDf.groupby('prefix_newVal')[['pred','predLabel']].mean()))
+    logging.warning(repr(testDf.groupby('title_newVal')[['pred','predLabel']].mean()))
     exportResult(testDf[['pred']], RESULT_PATH + "%s_pred.csv"%modelName)
     exportResult(testDf[['predLabel']], RESULT_PATH + "%s.csv"%modelName, header=False)
 
 if __name__ == '__main__':
     startTime = datetime.now()
+    fmt = '[%(asctime)s] %(levelname)s: %(message)s'
+    logging.basicConfig(
+        level=logging.WARNING,
+        format=fmt,
+        filename='./log/%s_%s.log'%(os.path.basename(__file__), startTime.strftime("%Y-%m-%d_%H_%M_%S")),
+        filemode='w',
+        datefmt="%Y-%m-%d %H:%M:%S")
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(console)
+
     main()
-    print('total time:', datetime.now() - startTime)
+    logging.warning('total time: %s' % (datetime.now() - startTime))

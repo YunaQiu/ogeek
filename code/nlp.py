@@ -34,13 +34,35 @@ def getStrSeg(str, stopWordList):
     '''
     对文本分词，统一大小写并去除停用词
     '''
-    cutList = jieba.cut_for_search(str.lower())
+    cutList = jieba.cut(str.lower())
     wordList = []
     for word in cutList:
         if len(word)<1 or (word in stopWordList):
             continue
         wordList.append(word)
     return wordList
+
+def calcCosSimilar(strList1, strList2, wvModel):
+    '''
+    计算词集合的cos相似度
+    '''
+    list1 = [word for word in strList1 if (word in wvModel.vocab.keys())]
+    list2 = [word for word in strList2 if (word in wvModel.vocab.keys())]
+    if len(list1)==0 or len(list2)==0:
+        result = np.nan
+    else:
+        result = wvModel.n_similarity(list1, list2)
+    return result
+
+def calcWmSimilar(strList1, strList2, wvModel):
+    '''
+    计算文档的词移距离
+    '''
+    dist = wvModel.wmdistance(strList1, strList2)
+    if dist==np.inf:
+        return np.nan
+    else:
+        return dist
 
 def strList2SegList(strList, stopWordList):
     '''
