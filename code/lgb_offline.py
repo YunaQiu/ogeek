@@ -4,12 +4,12 @@ import sys
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, log_loss
 import scipy as sp
 from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import jieba
 from Levenshtein import distance as lev_distance
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
 from gensim.models import KeyedVectors, Word2Vec
 from time import time
 from multiprocessing import Pool
@@ -80,9 +80,13 @@ def ctr_features(raw, sample):
     stat_ls = [['prefix'],
                ['title'],
                ['tag'],
+               # ['prefix_position'],
                ['prefix','title'],
                ['prefix','tag'],
                ['title','tag'],
+               # ['prefix', 'prefix_position'],
+               # ['title', 'prefix_position'],
+               # ['tag', 'prefix_position'],
                ['prefix','title','tag']]
     for l in stat_ls:
         sample = get_ctr(raw, sample, l)
@@ -123,6 +127,30 @@ def k_fold_stat_features(data, k=5):
     samples = pd.concat(samples,ignore_index=True)
     #samples = samples.reset_index(drop=True)
     return samples
+
+def k_fold_stat_features2(data, k=5, newRatio=0.4, random_state=0):
+    '''
+    构建含一定新数据比例的统计数据集
+    '''
+    print('-- get 5 fold stat features. plan 2')
+    kf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+    dfList = []
+    for i, (statIdx, taskIdx) in enumerate(kf.split(data.values, data['label'].values, groups=data['prefix'].values)):
+        tempDf = stat_features(data.iloc[statIdx].reset_index(drop=True), data.iloc[taskIdx].reset_index(drop=True))
+        tempDf.drop(tempDf[(tempDf['prefix_count']==0)|(tempDf['title_count']==0)].index, inplace=True)
+        dfList.append(tempDf)
+    oldDf = pd.concat(dfList, ignore_index=True)
+
+    kf = GroupKFold(n_splits=k)
+    dfList = []
+    for i, (statIdx, taskIdx) in enumerate(kf.split(data.values, data['label'].values, groups=data['prefix'].values)):
+        tempDf = stat_features(data.iloc[statIdx].reset_index(drop=True), data.iloc[taskIdx].reset_index(drop=True))
+        dfList.append(tempDf)
+    newDf = pd.concat(dfList, ignore_index=True)
+
+    newSampleNum = int(len(oldDf)/(1-newRatio)*newRatio)
+    data = pd.concat([oldDf, newDf.sample(n=newSampleNum, random_state=random_state)], ignore_index=True)
+    return data
 
 def map_to_array(func,data1,data2=None,paral=False):
     if paral==False:
@@ -399,7 +427,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         on=['prefix','query_prediction','title'])
     return sample
 
-def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000):
+def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, random_state=None):
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
@@ -417,7 +445,10 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
         'is_training_metric':True,
     }
 
-    lgb_train = lgb.Dataset(train_X, train_y)
+    if random_state is not None:
+        params['seed'] = random_state
+
+    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])
 
     if vali_y is not None:
         lgb_vali = lgb.Dataset(vali_X,vali_y)
@@ -432,23 +463,25 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
 
 def get_x_y(data):
     drop_list = ['prefix','query_prediction','title']
+    # drop_list.extend(['tag_%d'%i for i in range(21)])
     if 'label' in data.columns:
         y = data['label']
-        data.drop(drop_list+['label'],axis=1,inplace=True)
+        data = data.drop(drop_list+['label'],axis=1)
     else:
         y=None
-        data.drop(drop_list,axis=1,inplace=True)
+        data = data.drop(drop_list,axis=1)
     print('------ ',data.shape)
     return data,y
 
-def train_and_predict(samples,vali_samples,num_rounds=3000):
+def train_and_predict(samples,vali_samples,num_rounds=3000, **params):
     print('-- train and predict')
     print('---- get x and y')
     train_x,train_y = get_x_y(samples)
     vali_X,vali_y = get_x_y(vali_samples)
+    gc.collect()
 
     print('---- training')
-    model,best_iter = runLGBCV(train_x, train_y,vali_X,vali_y,num_rounds=num_rounds)
+    model,best_iter = runLGBCV(train_x, train_y,vali_X,vali_y,num_rounds=num_rounds, **params)
     print('best_iteration:',best_iter)
 
     print('---- predict')
@@ -470,9 +503,10 @@ if __name__ == "__main__":
 
     # 导入数据
     print("-- 导入原始数据", end='')
-    if os.path.isfile('train_re.csv') and os.path.isfile('vali_re.csv'):
-        raw_train = importCacheDf('train_re.csv')
-        raw_vali = importCacheDf('vali_re.csv')
+    if os.path.isfile('train_newcv_re.csv') and os.path.isfile('vali_newcv_re.csv'):
+    # if False:
+        raw_train = importCacheDf('train_newcv_re.csv')
+        raw_vali = importCacheDf('vali_newcv_re.csv')
     else:
         start = time()
         raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'])
@@ -493,14 +527,16 @@ if __name__ == "__main__":
         # 提取训练集统计特征
         print("-- 提取训练集统计特征", end='')
         start = time()
-        raw_train = k_fold_stat_features(raw_train)
+        tempTrain = raw_train
+        raw_train = k_fold_stat_features2(raw_train)
         gc.collect()
         print('   cost: %.1f ' %(time() - start))
 
         # 提取验证集统计特征
         print("-- 提取验证集统计特征", end='')
         start = time()
-        raw_vali = stat_features(raw_train, raw_vali)
+        raw_vali = stat_features(tempTrain, raw_vali)
+        del tempTrain
         gc.collect()
         print('   cost: %.1f ' %(time() - start))
 
@@ -515,14 +551,6 @@ if __name__ == "__main__":
         raw_vali['tag'] = encoder.transform(raw_vali['tag'])
         print('   cost: %.1f ' %(time() - start))
         del encoder
-        gc.collect()
-
-        '''
-        2、tag进行onehot
-        '''
-        raw_train = pd.get_dummies(raw_train, columns=['tag'])
-        gc.collect()
-        raw_vali = pd.get_dummies(raw_vali, columns=['tag'])
         gc.collect()
 
 
@@ -545,25 +573,38 @@ if __name__ == "__main__":
         gc.collect()
         print("-- 提取验证集其他文本特征", end='')
         raw_vali = text_features(raw_vali, w2v_model_1, w2v_model_2, stop_words)
-        del w2v_model_1, stop_words
+        del w2v_model_1, w2v_model_2, stop_words
         gc.collect()
 
 
-        raw_train.to_csv('train_re.csv', index=False)
-        raw_vali.to_csv('vali_re.csv', index=False)
+        raw_train.to_csv('train_newcv_re.csv', index=False)
+        raw_vali.to_csv('vali_newcv_re.csv', index=False)
 
-    model,best_iter,vali_pred,vali_y = train_and_predict(raw_train, raw_vali)
+    best_iter_list = []
+    best_logloss_list = []
+    best_thr_list = []
+    best_f1_list = []
+    for rd in range(5):
+        model,best_iter,vali_pred,vali_y = train_and_predict(raw_train, raw_vali, random_state=rd)
+        best_iter_list.append(best_iter)
+        best_logloss_list.append(log_loss(vali_y, vali_pred))
 
-    scores = []
-    print('-- search best split point')
-    for thre in range(100):
-        thre *=0.01
-        score = f1_score(vali_y,list(map(one_zero2,vali_pred,[thre]*len(vali_pred))))
-        scores.append(score)
+        scores = []
+        print('-- search best split point')
+        for thre in range(100):
+            thre *=0.01
+            score = f1_score(vali_y,list(map(one_zero2,vali_pred,[thre]*len(vali_pred))))
+            scores.append(score)
 
-    scores = np.array(scores)
-    best_5 = np.argsort(scores)[-5:]
-    best_5_s = scores[best_5]
-    for x,y in zip(best_5,best_5_s):
-        print('%.2f  %.4f' %(0.01*x,y))
-    max_thre = np.mean(best_5)*0.01
+        scores = np.array(scores)
+        best_5 = np.argsort(scores)[-5:]
+        best_thr_list.append(best_5[-1])
+        best_5_s = scores[best_5]
+        best_f1_list.append(best_5_s[-1])
+        for x,y in zip(best_5,best_5_s):
+            print('%.2f  %.4f' %(0.01*x,y))
+        max_thre = np.mean(best_5)*0.01
+    print('iter list:', best_iter_list)
+    print('logloss list:', best_logloss_list)
+    print('thr list:', best_thr_list)
+    print('f1 list:', best_f1_list)

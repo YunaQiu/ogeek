@@ -4,24 +4,29 @@ import sys
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, log_loss
 import scipy as sp
 from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import jieba
 from Levenshtein import distance as lev_distance
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
 from gensim.models import KeyedVectors, Word2Vec
 from time import time
 from multiprocessing import Pool
-import gc
+import gc, os
 import warnings
 
 warnings.filterwarnings("ignore")
+pd.set_option('display.max_rows',100)
 
-
-def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None):
-    df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3)
+def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None, **params):
+    df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3, **params)
     return df
+
+def importCacheDf(url):
+    df = df = pd.read_csv(url, na_values='', keep_default_na=False, float_precision="%.10f")
+    return df
+
 def one_zero2(data,thre):
     if data<thre:
         return 0
@@ -76,9 +81,13 @@ def ctr_features(raw, sample):
     stat_ls = [['prefix'],
                ['title'],
                ['tag'],
+               # ['prefix_position'],
                ['prefix','title'],
                ['prefix','tag'],
                ['title','tag'],
+               # ['prefix', 'prefix_position'],
+               # ['title', 'prefix_position'],
+               # ['tag', 'prefix_position'],
                ['prefix','title','tag']]
     for l in stat_ls:
         sample = get_ctr(raw, sample, l)
@@ -119,6 +128,30 @@ def k_fold_stat_features(data, k=5):
     samples = pd.concat(samples,ignore_index=True)
     #samples = samples.reset_index(drop=True)
     return samples
+
+def k_fold_stat_features2(data, k=5, newRatio=0.4, random_state=0):
+    '''
+    构建含一定新数据比例的统计数据集
+    '''
+    print('-- get 5 fold stat features. plan 2')
+    kf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+    dfList = []
+    for i, (statIdx, taskIdx) in enumerate(kf.split(data.values, data['label'].values, groups=data['prefix'].values)):
+        tempDf = stat_features(data.iloc[statIdx].reset_index(drop=True), data.iloc[taskIdx].reset_index(drop=True))
+        tempDf.drop(tempDf[(tempDf['prefix_count']==0)|(tempDf['title_count']==0)].index, inplace=True)
+        dfList.append(tempDf)
+    oldDf = pd.concat(dfList, ignore_index=True)
+
+    kf = GroupKFold(n_splits=k)
+    dfList = []
+    for i, (statIdx, taskIdx) in enumerate(kf.split(data.values, data['label'].values, groups=data['prefix'].values)):
+        tempDf = stat_features(data.iloc[statIdx].reset_index(drop=True), data.iloc[taskIdx].reset_index(drop=True))
+        dfList.append(tempDf)
+    newDf = pd.concat(dfList, ignore_index=True)
+
+    newSampleNum = int(len(oldDf)/(1-newRatio)*newRatio)
+    data = pd.concat([oldDf, newDf.sample(n=newSampleNum, random_state=random_state)], ignore_index=True)
+    return data
 
 def map_to_array(func,data1,data2=None,paral=False):
     if paral==False:
@@ -395,7 +428,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         on=['prefix','query_prediction','title'])
     return sample
 
-def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000):
+def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, random_state=None):
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
@@ -413,12 +446,15 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
         'is_training_metric':True,
     }
 
-    lgb_train = lgb.Dataset(train_X, train_y)
+    if random_state is not None:
+        params['seed'] = random_state
+
+    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])
 
     if vali_y is not None:
-        lgb_vali = lgb.Dataset(vali_X,vali_y)
+        lgb_vali = lgb.Dataset(vali_X,vali_y, reference=lgb_train)
         model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=10,early_stopping_rounds=200,
-                          valid_sets=[lgb_vali, lgb_train],valid_names=['val', 'train'])
+                          valid_sets=[lgb_vali],valid_names=['val'])
 
     else:
         model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=10,
@@ -430,21 +466,22 @@ def get_x_y(data):
     drop_list = ['prefix','query_prediction','title']
     if 'label' in data.columns:
         y = data['label']
-        data.drop(drop_list+['label'],axis=1,inplace=True)
+        data.drop(drop_list+['label'],axis=1, inplace=True)
     else:
         y=None
-        data.drop(drop_list,axis=1,inplace=True)
+        data.drop(drop_list,axis=1, inplace=True)
     print('------ ',data.shape)
     return data,y
 
-def train_and_predict(samples,vali_samples,num_rounds=3000):
+def train_and_predict(samples,vali_samples,num_rounds=3000, **params):
     print('-- train and predict')
     print('---- get x and y')
     train_x,train_y = get_x_y(samples)
     vali_X,vali_y = get_x_y(vali_samples)
+    gc.collect()
 
     print('---- training')
-    model,best_iter = runLGBCV(train_x, train_y,vali_X,vali_y,num_rounds=num_rounds)
+    model,best_iter = runLGBCV(train_x, train_y,vali_X,vali_y,num_rounds=num_rounds, **params)
     print('best_iteration:',best_iter)
 
     print('---- predict')
@@ -459,10 +496,10 @@ if __name__ == "__main__":
     train_dir = '../data/oppo_data_ronud2_20181107/data_train.txt'
     vali_dir = '../data/oppo_data_ronud2_20181107/data_vali.txt'
     test_dir = '../data/oppo_data_ronud2_20181107/data_test.txt'
-    vec_dir_1 = '../data/old_w2v_model/w2v_total_50wei.model'
+    vec_dir_1 = '../data/w2v_model/w2v_total_50wei.model'
     vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
-    srop_word_dir = './stop_words.txt'
-    test_result_dir = './lake_rebuild.csv'
+    srop_word_dir = '../xkl/stop_words.txt'
+    test_result_dir = './result/xkl_newcv.csv'
 
     # 导入数据
     print("-- 导入原始数据", end='')
@@ -471,6 +508,7 @@ if __name__ == "__main__":
     raw_vali = importDf(vali_dir, colNames=['prefix','query_prediction','title','tag','label'])
     raw_test = importDf(test_dir, colNames=['prefix','query_prediction','title','tag'])
     raw_train = pd.concat([raw_train, raw_vali], ignore_index=True).reset_index(drop=True)
+    del raw_vali
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
@@ -484,21 +522,20 @@ if __name__ == "__main__":
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
-    # raw_train['prefix_position'] = raw_train.apply(get_prefix_position, axis=1)
-    # raw_test['prefix_position'] = raw_test.apply(get_prefix_position, axis=1)
-
     ## 提取统计特征
     # 提取训练集统计特征
     print("-- 提取训练集统计特征", end='')
     start = time()
-    raw_train = k_fold_stat_features(raw_train)
+    tempTrain = raw_train
+    raw_train = k_fold_stat_features2(raw_train)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
     # 提取验证集统计特征
-    print("-- 提取测试集统计特征", end='')
+    print("-- 提取验证集统计特征", end='')
     start = time()
-    raw_test = stat_features(raw_train, raw_test)
+    raw_test = stat_features(tempTrain, raw_test)
+    del tempTrain
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
@@ -515,23 +552,14 @@ if __name__ == "__main__":
     del encoder
     gc.collect()
 
-    '''
-    2、tag进行onehot
-    '''
-    raw_train = pd.get_dummies(raw_train, columns=['tag'])
-    gc.collect()
-    raw_test = pd.get_dummies(raw_test, columns=['tag'])
-    gc.collect()
-
 
     '''
-    #3、其他
+    #2、其他
     '''
     # 导入模型和停用词表
     print("-- 导入词模型和停用词表", end='')
     start = time()
     w2v_model_1 = read_w2v_model(vec_dir_1)
-    #w2v_model_2 = None
     w2v_model_2 = read_w2v_model(vec_dir_2, persist=False)
     stop_words = read_stop_word(srop_word_dir)
     print('   cost: %.1f ' %(time() - start))
@@ -541,14 +569,14 @@ if __name__ == "__main__":
     start = time()
     raw_train = text_features(raw_train, w2v_model_1, w2v_model_2, stop_words)
     gc.collect()
-    print("-- 提取测试集其他文本特征", end='')
+    print("-- 提取验证集其他文本特征", end='')
     raw_test = text_features(raw_test, w2v_model_1, w2v_model_2, stop_words)
     del w2v_model_1, w2v_model_2, stop_words
     gc.collect()
 
     #开始训练
-    best_iter = 880
-    max_thre = 0.39
+    best_iter = 1032
+    max_thre = 0.386
     print('-- final training ')
     train_X,train_y = get_x_y(raw_train)
     model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)
@@ -565,3 +593,6 @@ if __name__ == "__main__":
 
     print('print result')
     result_analysis(test_pred)
+    print('feature importance:')
+    scoreDf = pd.DataFrame({'fea': train_X.columns, 'importance': model_.feature_importance()})
+    print(scoreDf.sort_values(['importance'], ascending=False).head(100))
