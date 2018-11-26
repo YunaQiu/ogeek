@@ -4,6 +4,7 @@ import sys
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
+from sklearn import metrics
 from sklearn.metrics import f1_score, log_loss
 import scipy as sp
 from sklearn.preprocessing import LabelEncoder,OneHotEncoder
@@ -63,6 +64,11 @@ def str_lower(sample):
     sample['prefix'] = list(map(str.lower,sample['prefix']))
     sample['title'] = list(map(str.lower,sample['title']))
     gc.collect()
+    return sample
+
+def fillnaQuery(sample, na='{}'):
+    tempDf = sample[sample.query_prediction!=na].drop_duplicates(['prefix']).set_index('prefix')['query_prediction']
+    sample.loc[sample.query_prediction==na, 'query_prediction'] = sample[sample.query_prediction==na]['prefix'].map(lambda x: tempDf[x] if x in tempDf.index else na)
     return sample
 
 def get_ctr(raw, sample, stat_list):
@@ -441,7 +447,7 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
-        return 'f1', f1_score(y_true, y_hat), True
+        return 'f1', metrics.f1_score(y_true, y_hat), True
 
     params = {
         'task': 'train',
@@ -451,6 +457,8 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
         'num_leaves': 127,
         'learning_rate': 0.02,
         'feature_fraction': 1,
+        'bagging_fraction': 0.95,
+    	'bagging_freq': 5,
         'num_threads':-1,
         'is_training_metric':True,
     }
@@ -473,10 +481,15 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
 
 def get_x_y(data):
     drop_list = ['prefix','query_prediction','title']
+    # drop_list.extend(['title_w2v_'+str(i) for i in range(50)])
+    # drop_list.extend(['prefix_w2v_'+str(i) for i in range(50)])
+    # drop_list.extend(['mx_w_query_w2v_'+str(i) for i in range(50)])
+
     # drop_list.extend(['prefix_position'])
     # drop_list.extend(['%s_ctr'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
     # drop_list.extend(['%s_count'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
     # drop_list.extend(['%s_click'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
+
     if 'label' in data.columns:
         y = data['label']
         data = data.drop(drop_list+['label'],axis=1)
@@ -527,14 +540,16 @@ if __name__ == "__main__":
     test_result_dir = './lake_20181122.csv'
 
     # 导入数据
+    train_fea_dir = 'train_re_new.csv'
+    vali_fea_dir = 'vali_re_new.csv'
     print("-- 导入原始数据", end='')
-    if os.path.isfile('train_re.csv') and os.path.isfile('vali_re.csv'):
-    # if False:
-        raw_train = importCacheDf('train_re.csv')
-        raw_vali = importCacheDf('vali_re.csv')
+    # if os.path.isfile(train_fea_dir) and os.path.isfile(vali_fea_dir):
+    if False:
+        raw_train = importCacheDf(train_fea_dir)
+        raw_vali = importCacheDf(vali_fea_dir)
     else:
         start = time()
-        raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'])
+        raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'], nrows=100000)
         raw_vali = importDf(vali_dir, colNames=['prefix','query_prediction','title','tag','label'])
         print('   cost: %.1f ' %(time() - start))
 
@@ -545,6 +560,8 @@ if __name__ == "__main__":
         raw_vali['query_prediction'].replace({'':'{}', np.nan:'{}'}, inplace=True)
         raw_train = str_lower(raw_train)
         raw_vali = str_lower(raw_vali)
+        # raw_train = fillnaQuery(raw_train, na='{}')
+        # raw_vali = fillnaQuery(raw_vali, na='{}')
         gc.collect()
         print('   cost: %.1f ' %(time() - start))
 
@@ -607,34 +624,48 @@ if __name__ == "__main__":
         del w2v_model_1, stop_words
         gc.collect()
 
-        raw_train.to_csv('train_re.csv', index=False)
-        raw_vali.to_csv('vali_re.csv', index=False)
+        # raw_train.to_csv(train_fea_dir, index=False)
+        # raw_vali.to_csv(vali_fea_dir, index=False)
+
+        temp_train = raw_train.describe().T
+        temp_vali = raw_vali.describe().T
+        temp_train.to_csv(train_fea_dir)
+        temp_vali.to_csv(vali_fea_dir)
+        exit()
 
     best_iter_list = []
     best_logloss_list = []
     best_thr_list = []
     best_f1_list = []
+    auc_list = []
     for rd in range(5):
         model,best_iter,vali_pred,vali_y = train_and_predict(raw_train, raw_vali, random_state=rd)
         best_iter_list.append(best_iter)
-        best_logloss_list.append(log_loss(vali_y, vali_pred))
+        best_logloss_list.append(metrics.log_loss(vali_y, vali_pred))
+
+        # 计算AUC
+        fpr, tpr, thresholds = metrics.roc_curve(vali_y, vali_pred, pos_label=1)
+        auc = metrics.auc(fpr, tpr)
+        auc_list.append(auc)
+        print('-- auc score: %f' % auc)
 
         scores = []
         print('-- search best split point')
         for thre in range(100):
             thre *=0.01
-            score = f1_score(vali_y,list(map(one_zero2,vali_pred,[thre]*len(vali_pred))))
+            score = metrics.f1_score(vali_y,list(map(one_zero2,vali_pred,[thre]*len(vali_pred))))
             scores.append(score)
 
         scores = np.array(scores)
         best_5 = np.argsort(scores)[-5:]
-        best_thr_list.append(best_5[-1])
         best_5_s = scores[best_5]
-        best_f1_list.append(best_5_s[-1])
+        best_f1_list.append(np.mean(best_5_s))
         for x,y in zip(best_5,best_5_s):
             print('%.2f  %.4f' %(0.01*x,y))
         max_thre = np.mean(best_5)*0.01
+        best_thr_list.append(max_thre)
     print('iter list:', best_iter_list)
     print('logloss list:', best_logloss_list)
+    print('auc list:', auc_list)
     print('thr list:', best_thr_list)
     print('f1 list:', best_f1_list)
