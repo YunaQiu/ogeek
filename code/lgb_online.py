@@ -171,7 +171,7 @@ def map_to_array(func,data1,data2=None,paral=False):
     data = np.array(data)
     return data
 
-def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
+def text_features(sample, w2v_model_1, ext_vec_dirs, stop_words):
     def get_query_weight(data):
         print('------ split query and weight', end='')
         start = time()
@@ -349,7 +349,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         print('   cost: %.1f ' %(time()-start))
         return sample
 
-    def word2vec_features_2(sample):
+    def word2vec_features_2(sample, alias='2'):
         print('------ word2vec features 2',end='')
         start = time()
 
@@ -366,7 +366,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         max_w_query = querys[idx,weight_argmax]
         cos = list(map(calc_all_cos,sample['prefix'],sample['title'],max_w_query))
 
-        cos = pd.DataFrame(cos,columns=['prefix_title_cos_2','prefix_mx_query_cos_2','mx_w_query_title_cos_2'], index=sample.index)
+        cos = pd.DataFrame(cos,columns=['prefix_title_cos_%s'%alias,'prefix_mx_query_cos_%s'%alias,'mx_w_query_title_cos_%s'%alias], index=sample.index)
 
         sample = pd.concat([sample,cos],axis=1)
         print('   cost: %.1f ' %(time()-start))
@@ -419,9 +419,12 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
     tempDf = word2vec_features_1(tempDf)
     gc.collect()
 
-    w2v_model = w2v_model_2
-    tempDf = word2vec_features_2(tempDf)
-    gc.collect()
+    for i,dir in enumerate(ext_vec_dirs):
+        w2v_model = read_w2v_model(dir, persist=False)#
+        tempDf = word2vec_features_2(tempDf,str(i+2))
+        del w2v_model
+        gc.collect()
+
     sample = sample.merge(
         tempDf[['prefix','query_prediction','title'] + np.setdiff1d(tempDf.columns,sample.columns).tolist()],
         how='left',
@@ -498,8 +501,14 @@ if __name__ == "__main__":
     test_dir = '../data/oppo_data_ronud2_20181107/data_test.txt'
     vec_dir_1 = '../data/w2v_model/w2v_total_50wei.model'
     vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
+    ext_vec_dirs = [
+        '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt',
+        '../data/sgns.merge.bigram/sgns.merge.bigram',
+        '../data/sgns.merge.word/sgns.merge.word',
+        '../data/sgns.merge.char/sgns.merge.char',
+        ]
     srop_word_dir = '../xkl/stop_words.txt'
-    test_result_dir = './result/xkl_newcv.csv'
+    test_result_dir = './result/xkl_4w2v.csv'
 
     # 导入数据
     print("-- 导入原始数据", end='')
@@ -527,7 +536,7 @@ if __name__ == "__main__":
     print("-- 提取训练集统计特征", end='')
     start = time()
     tempTrain = raw_train
-    raw_train = k_fold_stat_features2(raw_train)
+    raw_train = k_fold_stat_features(raw_train)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
@@ -560,23 +569,24 @@ if __name__ == "__main__":
     print("-- 导入词模型和停用词表", end='')
     start = time()
     w2v_model_1 = read_w2v_model(vec_dir_1)
-    w2v_model_2 = read_w2v_model(vec_dir_2, persist=False)
     stop_words = read_stop_word(srop_word_dir)
     print('   cost: %.1f ' %(time() - start))
 
     # 提取其他文本特征
     print("-- 提取训练集其他文本特征", end='')
     start = time()
-    raw_train = text_features(raw_train, w2v_model_1, w2v_model_2, stop_words)
+    raw_train = text_features(raw_train, w2v_model_1, ext_vec_dirs, stop_words)
+    # raw_train = text_features(raw_train, w2v_model_1, w2v_model_2, stop_words)
     gc.collect()
     print("-- 提取验证集其他文本特征", end='')
-    raw_test = text_features(raw_test, w2v_model_1, w2v_model_2, stop_words)
-    del w2v_model_1, w2v_model_2, stop_words
+    raw_test = text_features(raw_test, w2v_model_1, ext_vec_dirs, stop_words)
+    # raw_vali = text_features(raw_vali, w2v_model_1, w2v_model_2, stop_words)
+    del w2v_model_1, stop_words
     gc.collect()
 
     #开始训练
-    best_iter = 1032
-    max_thre = 0.386
+    best_iter = 766
+    max_thre = 0.4
     print('-- final training ')
     train_X,train_y = get_x_y(raw_train)
     model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)

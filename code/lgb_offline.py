@@ -9,7 +9,7 @@ import scipy as sp
 from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import jieba
 from Levenshtein import distance as lev_distance
-from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
+from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold, train_test_split
 from gensim.models import KeyedVectors, Word2Vec
 from time import time
 from multiprocessing import Pool
@@ -31,6 +31,12 @@ def one_zero2(data,thre):
         return 0
     else:
         return 1
+
+#统计prefix在title中的位置
+def get_prefix_position(df):
+    title = df['title']
+    prefix = df['prefix']
+    return str(title).find(str(prefix))
 
 def get_tag_dict(raw):
     label_encoder = LabelEncoder()
@@ -170,7 +176,7 @@ def map_to_array(func,data1,data2=None,paral=False):
     data = np.array(data)
     return data
 
-def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
+def text_features(sample, w2v_model_1, ext_vec_dirs, stop_words):
     def get_query_weight(data):
         print('------ split query and weight', end='')
         start = time()
@@ -348,7 +354,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         print('   cost: %.1f ' %(time()-start))
         return sample
 
-    def word2vec_features_2(sample):
+    def word2vec_features_2(sample, alias='2'):
         print('------ word2vec features 2',end='')
         start = time()
 
@@ -365,7 +371,7 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
         max_w_query = querys[idx,weight_argmax]
         cos = list(map(calc_all_cos,sample['prefix'],sample['title'],max_w_query))
 
-        cos = pd.DataFrame(cos,columns=['prefix_title_cos_2','prefix_mx_query_cos_2','mx_w_query_title_cos_2'], index=sample.index)
+        cos = pd.DataFrame(cos,columns=['prefix_title_cos_%s'%alias,'prefix_mx_query_cos_%s'%alias,'mx_w_query_title_cos_%s'%alias], index=sample.index)
 
         sample = pd.concat([sample,cos],axis=1)
         print('   cost: %.1f ' %(time()-start))
@@ -419,8 +425,12 @@ def text_features(sample, w2v_model_1, w2v_model_2, stop_words):
     gc.collect()
 
     # w2v_model = w2v_model_2
-    # tempDf = word2vec_features_2(tempDf)
-    # gc.collect()
+    for i,dir in enumerate(ext_vec_dirs):
+        w2v_model = read_w2v_model(dir, persist=False)#
+        tempDf = word2vec_features_2(tempDf,str(i+2))
+        del w2v_model
+        gc.collect()
+
     sample = sample.merge(
         tempDf[['prefix','query_prediction','title'] + np.setdiff1d(tempDf.columns,sample.columns).tolist()],
         how='left',
@@ -448,7 +458,7 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
     if random_state is not None:
         params['seed'] = random_state
 
-    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])
+    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])#
 
     if vali_y is not None:
         lgb_vali = lgb.Dataset(vali_X,vali_y)
@@ -463,14 +473,17 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
 
 def get_x_y(data):
     drop_list = ['prefix','query_prediction','title']
-    # drop_list.extend(['tag_%d'%i for i in range(21)])
+    # drop_list.extend(['prefix_position'])
+    # drop_list.extend(['%s_ctr'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
+    # drop_list.extend(['%s_count'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
+    # drop_list.extend(['%s_click'%x for x in ['prefix_position','prefix_prefix_position','title_prefix_position','tag_prefix_position']])
     if 'label' in data.columns:
         y = data['label']
         data = data.drop(drop_list+['label'],axis=1)
     else:
         y=None
         data = data.drop(drop_list,axis=1)
-    print('------ ',data.shape)
+    # print('------ ',data.shape)
     return data,y
 
 def train_and_predict(samples,vali_samples,num_rounds=3000, **params):
@@ -478,6 +491,13 @@ def train_and_predict(samples,vali_samples,num_rounds=3000, **params):
     print('---- get x and y')
     train_x,train_y = get_x_y(samples)
     vali_X,vali_y = get_x_y(vali_samples)
+
+    # train_x, extra_x, train_y, extra_y = train_test_split(train_x, train_y, train_size=0.95, random_state=params['random_state'])
+    # vali_X = pd.concat([extra_x, vali_X], copy=False)
+    # vali_y = pd.concat([extra_y, vali_y], copy=False)
+    # del extra_x, extra_y
+
+    print('------ train shape: %s, vali shape: %s' % (train_x.shape, vali_X.shape))
     gc.collect()
 
     print('---- training')
@@ -497,16 +517,21 @@ if __name__ == "__main__":
     vali_dir = '../data/data_vali.txt'
     test_dir = '../data/data_test.txt'
     vec_dir_1 = '../data/w2v_model/w2v_total_50wei.model'
-    vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
+    # vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
+    ext_vec_dirs = [
+        # '../data/w2v_model/w2v_total_50wei.model',
+        # '../data/w2v_model/w2v_total_50wei.model',
+        # '../data/'
+        ]
     srop_word_dir = '../data/stop_words.txt'
     test_result_dir = './lake_20181122.csv'
 
     # 导入数据
     print("-- 导入原始数据", end='')
-    if os.path.isfile('train_newcv_re.csv') and os.path.isfile('vali_newcv_re.csv'):
+    if os.path.isfile('train_re.csv') and os.path.isfile('vali_re.csv'):
     # if False:
-        raw_train = importCacheDf('train_newcv_re.csv')
-        raw_vali = importCacheDf('vali_newcv_re.csv')
+        raw_train = importCacheDf('train_re.csv')
+        raw_vali = importCacheDf('vali_re.csv')
     else:
         start = time()
         raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'])
@@ -523,12 +548,20 @@ if __name__ == "__main__":
         gc.collect()
         print('   cost: %.1f ' %(time() - start))
 
+        # # 提取全局特征
+        # print("-- 提取全局特征", end='')
+        # start = time()
+        # raw_train['prefix_position'] = raw_train.apply(get_prefix_position, axis=1)
+        # raw_vali['prefix_position'] = raw_vali.apply(get_prefix_position, axis=1)
+        # gc.collect()
+        # print('   cost: %.1f ' %(time() - start))
+
         ## 提取统计特征
         # 提取训练集统计特征
         print("-- 提取训练集统计特征", end='')
         start = time()
         tempTrain = raw_train
-        raw_train = k_fold_stat_features2(raw_train)
+        raw_train = k_fold_stat_features(raw_train)
         gc.collect()
         print('   cost: %.1f ' %(time() - start))
 
@@ -561,24 +594,21 @@ if __name__ == "__main__":
         print("-- 导入词模型和停用词表", end='')
         start = time()
         w2v_model_1 = read_w2v_model(vec_dir_1)
-        w2v_model_2 = None
-        # w2v_model_2 = read_w2v_model(vec_dir_2, persist=False)
         stop_words = read_stop_word(srop_word_dir)
         print('   cost: %.1f ' %(time() - start))
 
         # 提取其他文本特征
         print("-- 提取训练集其他文本特征", end='')
         start = time()
-        raw_train = text_features(raw_train, w2v_model_1, w2v_model_2, stop_words)
+        raw_train = text_features(raw_train, w2v_model_1, ext_vec_dirs, stop_words)
         gc.collect()
         print("-- 提取验证集其他文本特征", end='')
-        raw_vali = text_features(raw_vali, w2v_model_1, w2v_model_2, stop_words)
-        del w2v_model_1, w2v_model_2, stop_words
+        raw_vali = text_features(raw_vali, w2v_model_1, ext_vec_dirs, stop_words)
+        del w2v_model_1, stop_words
         gc.collect()
 
-
-        raw_train.to_csv('train_newcv_re.csv', index=False)
-        raw_vali.to_csv('vali_newcv_re.csv', index=False)
+        raw_train.to_csv('train_re.csv', index=False)
+        raw_vali.to_csv('vali_re.csv', index=False)
 
     best_iter_list = []
     best_logloss_list = []
