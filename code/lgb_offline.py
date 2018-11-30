@@ -11,10 +11,11 @@ from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import jieba
 from Levenshtein import distance as lev_distance
 from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold, train_test_split
+from gensim.corpora import Dictionary
 from gensim.models import KeyedVectors, Word2Vec
 from time import time
 from multiprocessing import Pool
-import gc, os
+import gc, os, math
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -241,12 +242,15 @@ def addQueryCache(data, cache):
     return cache
 
 def min_max_mean_std(sample,data,name,func_name, **params):
-    data_w = data*params['norm_weights']
+    data_nw = data * params['norm_weights']
+    data_w = data * params['weights']
     sample[name+'_min_'+func_name] = np.min(data,1)
     sample[name+'_max_'+func_name] = np.max(data,1)
-    sample[name+'_mean_'+func_name] = np.divide(np.sum(data_w,1),sample['query_num'])
+    sample[name+'_mean_'+func_name] = np.sum(data_w, 1)
+    sample[name+'_norm_mean_'+func_name] = np.sum(data_nw,1)
     sample[name+'_std_'+func_name] = np.sum(np.power(data      \
-                                            - np.array(sample[name+'_mean_'+func_name]).reshape(-1,1),2)*params['norm_weights'],1)
+                                            - np.array(sample[name+'_norm_mean_'+func_name]).reshape(-1,1),2)*params['norm_weights'],1)
+    del data_nw,data_w
     return sample
 
 def weight_features(sample, **cache):
@@ -255,7 +259,11 @@ def weight_features(sample, **cache):
     start = time()
 
     sample['weight_sum'] = np.sum(cache['weights'],1)
-    sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
+    # sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
+    sample['weight_min'] = np.min(cache['weights'],1)
+    sample['weight_max'] = np.max(cache['weights'],1)
+    sample['weight_mean'] = np.mean(cache['weights'],1)
+    sample['weight_std'] = np.std(cache['weights'],1)
 
     print('   cost: %.1f ' %(time()-start))
     return sample
@@ -346,9 +354,11 @@ def get_sentence_vec(word_seg, w2v_model, **params):
     s_vector = np.zeros((len(w2v_model['我'])))
     if len(word_seg) > 0:
         count=0
+        # dct = params['dictionary']
         for word in word_seg :
             try:
-                vec = w2v_model[word]
+                # idf = math.log2(dct.num_docs / dct.dfs[dct.token2id[word]]) if word in dct.token2id else 1
+                vec = w2v_model[word]# * idf
                 s_vector += vec
                 count += 1
             except (KeyError):
@@ -537,7 +547,7 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
 
 def get_x_y(data):
     drop_list = ['prefix','query_prediction','title']
-    drop_list.extend(['query_title_mean_cos_0','query_title_max_cos_0','query_title_max_cos_0_weight'])
+    # drop_list.extend(['weight_mean_','query_mean_len','query_title_mean_lev','query_title_mean_jac'])
 
     if 'label' in data.columns:
         y = data['label']
@@ -578,11 +588,12 @@ if __name__ == "__main__":
         # '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt',
         ]
     srop_word_dir = '../data/stop_words.txt'
+    dictionary_dir = './dictionary.txt'
     test_result_dir = './lake_20181122.csv'
 
     # 导入数据
-    train_fea_dir = 'train_text_stat.csv'
-    vali_fea_dir = 'vali_text_stat.csv'
+    train_fea_dir = 'train_weight_stat.csv'
+    vali_fea_dir = 'vali_weight_stat.csv'
     print("-- 导入原始数据", end='')
     if os.path.isfile(train_fea_dir) and os.path.isfile(vali_fea_dir):
     # if False:
@@ -655,6 +666,7 @@ if __name__ == "__main__":
         start = time()
         w2v_model_1 = read_w2v_model(vec_dir_1)
         stop_words = read_stop_word(srop_word_dir)
+        # dictionary = Dictionary.load_from_text(dictionary_dir)
         print('   cost: %.1f ' %(time() - start))
 
         # 提取其他文本特征
@@ -713,6 +725,8 @@ if __name__ == "__main__":
     print('thr list:', best_thr_list)
     print('f1 list:', best_f1_list)
 
+    raw_vali['pred'] = vali_pred
+    raw_vali.to_csv('../result/xkl_fea_vali.csv', index=False)
     # # 特征重要性
     # print('feature importance:')
     # scoreDf = pd.DataFrame({'fea': train_X.columns, 'importance': model_.feature_importance()})

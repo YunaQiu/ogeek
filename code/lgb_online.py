@@ -241,12 +241,15 @@ def addQueryCache(data, cache):
     return cache
 
 def min_max_mean_std(sample,data,name,func_name, **params):
-    data_w = data*params['norm_weights']
+    data_nw = data * params['norm_weights']
+    data_w = data * params['weights']
     sample[name+'_min_'+func_name] = np.min(data,1)
     sample[name+'_max_'+func_name] = np.max(data,1)
-    sample[name+'_mean_'+func_name] = np.divide(np.sum(data_w,1),sample['query_num'])
+    sample[name+'_mean_'+func_name] = np.sum(data_w, 1)
+    sample[name+'_norm_mean_'+func_name] = np.sum(data_nw,1)
     sample[name+'_std_'+func_name] = np.sum(np.power(data      \
-                                            - np.array(sample[name+'_mean_'+func_name]).reshape(-1,1),2)*params['norm_weights'],1)
+                                            - np.array(sample[name+'_norm_mean_'+func_name]).reshape(-1,1),2)*params['norm_weights'],1)
+    del data_nw,data_w
     return sample
 
 def weight_features(sample, **cache):
@@ -255,7 +258,11 @@ def weight_features(sample, **cache):
     start = time()
 
     sample['weight_sum'] = np.sum(cache['weights'],1)
-    sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
+    # sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
+    sample['weight_min'] = np.min(cache['weights'],1)
+    sample['weight_max'] = np.max(cache['weights'],1)
+    sample['weight_mean'] = np.mean(cache['weights'],1)
+    sample['weight_std'] = np.std(cache['weights'],1)
 
     print('   cost: %.1f ' %(time()-start))
     return sample
@@ -346,9 +353,11 @@ def get_sentence_vec(word_seg, w2v_model, **params):
     s_vector = np.zeros((len(w2v_model['我'])))
     if len(word_seg) > 0:
         count=0
+        # dct = params['dictionary']
         for word in word_seg :
             try:
-                vec = w2v_model[word]
+                # idf = math.log2(dct.num_docs / dct.dfs[dct.token2id[word]]) if word in dct.token2id else 1
+                vec = w2v_model[word]# * idf
                 s_vector += vec
                 count += 1
             except (KeyError):
@@ -393,8 +402,6 @@ def addEmbedCache(sample, cache):
     start = time()
     cache['title_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['title_seg'])))
     cache['prefix_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['prefix_seg'])))
-#     cache['query_embed'] = np.array(list(map(lambda x: [get_sentence_vec(q, **cache) for q in x], cache['query_seg'])))
-#     cache['mx_w_query_embed'] = cache['query_embed'][cache['idx'], cache['weight_argmax']]
     cache['mx_w_query_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['mx_w_query_seg'])))
     print('   cost: %.1f ' %(time()-start))
     return cache
@@ -441,15 +448,8 @@ def cos_feature(sample, alias='0', **cache):
 
     sample['prefix_title_cos_%s'%alias] = cosine(cache['title_embed'],cache['prefix_embed'])
     sample['prefix_mx_query_cos_%s'%alias] = cosine(cache['prefix_embed'],cache['mx_w_query_embed'])
-#     query_cos = np.array([cosine(cache['query_embed'][:,i,:], cache['title_embed']) for i in range(cache['query_embed'].shape[1])]).T
-#     sample['query_title_mean_cos_%s'%alias] = np.divide(np.multiply(query_cos, cache['weights']).sum(axis=1), sample['query_num'])
-#     sample['query_title_max_cos_%s'%alias] = query_cos.max(axis=1)
-#     query_argmax_cos = query_cos.argmax(axis=1)
-#     sample['query_title_max_cos_%s_weight'%alias] = cache['weights'][cache['idx'], query_argmax_cos]
-#     sample['mx_w_query_title_cos_%s'%alias] = query_cos[cache['idx'], cache['weight_argmax']]
     sample['mx_w_query_title_cos_%s'%alias] = cosine(cache['title_embed'],cache['mx_w_query_embed'])
 
-#     del query_cos,query_argmax_cos
     print('   cost: %.1f ' %(time()-start))
     return sample
 
@@ -578,8 +578,7 @@ if __name__ == "__main__":
     train_dir = '../data/oppo_data_ronud2_20181107/data_train.txt'
     vali_dir = '../data/oppo_data_ronud2_20181107/data_vali.txt'
     test_dir = '../data/oppo_data_ronud2_20181107/data_test.txt'
-    vec_dir_1 = '../data/w2v_model/w2v_total_50wei.model'
-    vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
+    vec_dir_1 = '../data/keng_w2v_model/w2v_total_final_50wei_1.model'
     ext_vec_dirs = [
         '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt',
 #         '../data/sgns.merge.bigram/sgns.merge.bigram',
@@ -587,7 +586,7 @@ if __name__ == "__main__":
 #         '../data/sgns.merge.char/sgns.merge.char',
         ]
     srop_word_dir = '../xkl/stop_words.txt'
-    test_result_dir = './result/xkl_fea.csv'
+    test_result_dir = './result/xkl_fea2.csv'
 
     # 导入数据
     print("-- 导入原始数据", end='')
@@ -672,8 +671,8 @@ if __name__ == "__main__":
     #开始训练
 #     best_iter = 663
 #     max_thre = 0.37
-    best_iter = 958
-    max_thre = 0.37
+    best_iter = 895
+    max_thre = 0.38
     print('-- final training ')
     train_X,train_y = get_x_y(raw_train)
     model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)
@@ -684,8 +683,8 @@ if __name__ == "__main__":
     test_X,_ = get_x_y(raw_test)
     test_pred = model_.predict(test_X)
 
-    raw_test['pred'] = vali_pred
-    raw_test.to_csv('./result/xkl_fea_testa.csv', index=False)
+    raw_test['pred'] = test_pred
+    raw_test.to_csv('./result/xkl_fea2_testa.csv', index=False)
 
     print('-- process to get result')
     test_y = pd.Series(list(map(one_zero2,test_pred,[max_thre]*len(test_pred))))
