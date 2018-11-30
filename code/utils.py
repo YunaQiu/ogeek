@@ -19,8 +19,8 @@ from sklearn.metrics.pairwise import pairwise_distances
 import jieba
 
 # 导入数据
-def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None):
-    df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3)
+def importDf(url, sep='\t', na_values=None, header=None, index_col=None, colNames=None, **params):
+    df = pd.read_table(url, names=colNames, header=header, na_values='', keep_default_na=False, encoding='utf-8', quoting=3, **params)
     return df
 
 # 导入中间文件

@@ -33,6 +33,12 @@ def one_zero2(data,thre):
     else:
         return 1
 
+#统计prefix在title中的位置
+def get_prefix_position(df):
+    title = df['title']
+    prefix = df['prefix']
+    return str(title).find(str(prefix))
+
 def get_tag_dict(raw):
     label_encoder = LabelEncoder()
     label_encoder.fit(raw['tag'])
@@ -40,7 +46,7 @@ def get_tag_dict(raw):
 
 def read_w2v_model(model_dir,persist=True):
     if persist:
-        w2v_model = Word2Vec.load(model_dir)
+        w2v_model = Word2Vec.load(model_dir).wv
     else:
         w2v_model = KeyedVectors.load_word2vec_format(model_dir)
     return w2v_model
@@ -58,6 +64,17 @@ def str_lower(sample):
     sample['prefix'] = list(map(str.lower,sample['prefix']))
     sample['title'] = list(map(str.lower,sample['title']))
     gc.collect()
+    return sample
+
+def fillnaQuery(sample, na='{}'):
+    tempDf = sample[sample.query_prediction!=na].drop_duplicates(['prefix']).set_index('prefix')['query_prediction']
+    sample.loc[sample.query_prediction==na, 'query_prediction'] = sample[sample.query_prediction==na]['prefix'].map(lambda x: tempDf[x] if x in tempDf.index else na)
+    return sample
+
+def queryNum(sample):
+    tempDf = sample[['query_prediction']].drop_duplicates()
+    tempDf['query_num'] = tempDf['query_prediction'].map(lambda x: len(eval(x)))
+    sample = sample.merge(tempDf, 'left', on=['query_prediction'])
     return sample
 
 def get_ctr(raw, sample, stat_list):
@@ -85,6 +102,7 @@ def ctr_features(raw, sample):
                ['prefix','title'],
                ['prefix','tag'],
                ['title','tag'],
+               ['query_num','tag'],
                # ['prefix', 'prefix_position'],
                # ['title', 'prefix_position'],
                # ['tag', 'prefix_position'],
@@ -109,10 +127,31 @@ def lake_features(raw, sample):
         gc.collect()
     return sample
 
+def get_ratio_in_col(raw, sample, col1, col2):
+    crossColDf = raw.reset_index().groupby([col1,col2])['index'].agg(len).to_frame('count')
+    col2Df = crossColDf.groupby(col2)['count'].sum().to_frame('sum')
+    crossColDf = crossColDf.merge(col2Df, 'left', left_on=col2, right_index=True)
+    crossColDf['ratio_%s_in_%s'%(col1, col2)] = crossColDf['count'] / crossColDf['sum']
+    sample = sample.merge(crossColDf[['ratio_%s_in_%s'%(col1, col2)]], 'left', left_on=[col1,col2], right_index=True)
+    return sample
+
+def ratio_col_features(raw, sample):
+    stat_ls = [['tag','prefix'],
+               ['prefix','tag'],
+               ['prefix','title'],
+               ['title','prefix'],
+               ['title','tag'],
+               ['tag','title']]
+    for col1, col2 in stat_ls:
+        sample = get_ratio_in_col(raw, sample, col1, col2)
+        gc.collect()
+    return sample
+
 def stat_features(raw, sample):
     sample = str_lower(sample)
     sample = lake_features(raw, sample)
     sample = ctr_features(raw, sample)
+    sample = ratio_col_features(raw, sample)
     return sample
 
 def k_fold_stat_features(data, k=5):
@@ -171,260 +210,298 @@ def map_to_array(func,data1,data2=None,paral=False):
     data = np.array(data)
     return data
 
-def text_features(sample, w2v_model_1, ext_vec_dirs, stop_words):
-    def get_query_weight(data):
-        print('------ split query and weight', end='')
-        start = time()
-        def split_query_weight(data):
-            query_prediction = eval(data)
-            query = [key.lower() for key in sorted(query_prediction)][:11]
-            weight = [float(query_prediction[key]) for key in sorted(query_prediction)][:11]
-            return [query, weight]
+# =========================================
+def addQueryCache(data, cache):
+    print('------ split query and weight', end='')
+    start = time()
 
-        querys = []
-        weights = []
-        for query, weight in map(split_query_weight, data):
-            querys.append(query)
-            weights.append(weight)
-        print('get query weight:', data.shape, len(querys), len(weights))
-        querys = pd.DataFrame(querys,columns=['query_'+str(i) for i in range(11)]).fillna('')
-        weights = pd.DataFrame(weights,columns=['weight_'+str(i) for i in range(11)]).fillna(0)
-        querys = np.array(querys)
-        weights = np.array(weights)
+    tempSeries = data.drop_duplicates()
+    querys = []
+    weights = []
+    for q in tempSeries:
+        query_prediction = eval(q)
+        query = [key.lower() for key in sorted(query_prediction)][:11]
+        weight = [float(query_prediction[key]) for key in sorted(query_prediction)][:11]
+        querys.append(query)
+        weights.append(weight)
+    querys = pd.DataFrame(querys,columns=list(range(11)), index=tempSeries.values).fillna('')
+    weights = pd.DataFrame(weights,columns=list(range(11)), index=tempSeries.values).fillna(0)
+    norm_weights = weights.div(weights.sum(axis=1)+0.001, axis=0)
+    weight_argmax = weights.idxmax(axis=1)
+    cache['querys'] = querys.loc[data.values].values
+    cache['weights'] = weights.loc[data.values].values
+    cache['norm_weights'] = norm_weights.loc[data.values].values
+    cache['weight_argmax'] = weight_argmax.loc[data.values].values
+    cache['idx'] = tuple(range(cache['weight_argmax'].shape[0]))
+    cache['max_w_query'] = cache['querys'][cache['idx'], cache['weight_argmax']]
+    print('get query weight:', data.shape, querys.shape, weights.shape, norm_weights.shape)
 
-        norm_weights = weights / (np.sum(weights,1).reshape((-1,1))+0.001)
-        print('get query weight:', querys.shape, weights.shape, norm_weights.shape)
+    del querys, weights, norm_weights, weight_argmax
+    print('   cost: %.1f ' %(time()-start))
+    return cache
 
-        print('   cost: %.1f ' %(time()-start))
-        return querys, weights, norm_weights
+def min_max_mean_std(sample,data,name,func_name, **params):
+    data_w = data*params['norm_weights']
+    sample[name+'_min_'+func_name] = np.min(data,1)
+    sample[name+'_max_'+func_name] = np.max(data,1)
+    sample[name+'_mean_'+func_name] = np.divide(np.sum(data_w,1),sample['query_num'])
+    sample[name+'_std_'+func_name] = np.sum(np.power(data      \
+                                            - np.array(sample[name+'_mean_'+func_name]).reshape(-1,1),2)*params['norm_weights'],1)
+    return sample
 
-    def min_max_mean_std(sample,data,name,func_name):
-        data_w = data*norm_weights
-        sample[name+'_min_'+func_name] = np.min(data,1)
-        sample[name+'_max_'+func_name] = np.max(data,1)
-        sample[name+'_mean_'+func_name] =np.divide(np.sum(data_w,1),sample['query_num'])
-        sample[name+'_std_'+func_name] = np.sum(np.power(data      \
-                                                - np.array(sample[name+'_mean_'+func_name]).reshape(-1,1),2)*norm_weights,1)
-        return sample
+def weight_features(sample, **cache):
+    print('------ weight features',end='')
+    print('weight fea:',sample.shape, cache['weights'].shape)
+    start = time()
 
-    def get_max_weight_idx():
-        weight_argmax = tuple(np.argmax(weights,1))
-        idx = tuple(range(len(weight_argmax)))
-        return idx,weight_argmax
+    sample['weight_sum'] = np.sum(cache['weights'],1)
+    sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
 
-    def split_sentence(s):
-        return [w for w in jieba.cut(s) if w not in stop_words]
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-    def lev_features(sample):
-        print('------ lev features', end='')
-        start = time()
-        def get_lev_dist_list(query,data):
-            query_data_levs = [lev_distance(q,data) for q in query]
-            return query_data_levs
+def len_features(sample, **cache):
+    print('------ len features',end = '')
+    start = time()
+    def get_query_len(query):
+        q_lens = [len(q) for q in query]
+        return q_lens
 
-        query_title_levs = map_to_array(get_lev_dist_list,querys,sample['title'])
-        sample = min_max_mean_std(sample,query_title_levs,'query_title','lev')
-        sample['mx_w_query_title_lev'] = query_title_levs[idx,weight_argmax]
-        sample['prefix_title_lev'] = list(map(lev_distance,sample['prefix'],sample['title']))
+    querys_lens = map_to_array(get_query_len,cache['querys'])
+    sample = min_max_mean_std(sample,querys_lens, 'query','len', **cache)
 
-        max_w_query = querys[idx,weight_argmax]
-        sample['mx_w_prefix_query_lev'] = list(map(lev_distance,sample['prefix'],max_w_query))
+    sample['prefix_len'] = list(map(len,sample['prefix']))
+    sample['title_len'] = list(map(len,sample['title']))
 
-        levs = pd.DataFrame(np.sort(query_title_levs, axis=1),columns=['lev_'+str(i) for i in range(11)], index=sample.index)
+    max_w_query_len = querys_lens[cache['idx'],cache['weight_argmax']]
 
-        sample = pd.concat([sample,levs],axis=1)
+    sample['mx_w_prfx_qry_len_sub'] = max_w_query_len-sample['prefix_len']
 
-        print('   cost: %.1f ' %(time()-start))
-        return sample
+    sample['title_prefix_len_sub'] = sample['title_len']-sample['prefix_len']
+    sample['query_title_len_sub'] = sample['query_mean_len'] - sample['title_len']
+    sample['query_prefix_len_sub'] = sample['query_mean_len'] - sample['prefix_len']
+    sample['prefix_query_len_div'] = sample['prefix_len'].div(sample['query_mean_len'])
+    sample['prefix_title_len_div'] = sample['prefix_len'].div(sample['title_len'])
 
-    def len_features(sample):
-        print('------ len features',end = '')
-        start = time()
-        def get_query_len(query):
-            q_lens = [len(q) for q in query]
-            return q_lens
+    del max_w_query_len, querys_lens
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-        querys_lens = map_to_array(get_query_len,querys)
-        sample = min_max_mean_std(sample,querys_lens,'query','len')
+def lev_features(sample, **cache):
+    print('------ lev features', end='')
+    start = time()
+    def get_lev_dist_list(query,data):
+        query_data_levs = [lev_distance(q,data) for q in query]
+        return query_data_levs
 
-        sample['prefix_len'] = list(map(len,sample['prefix']))
-        sample['title_len'] = list(map(len,sample['title']))
+    query_title_levs = map_to_array(get_lev_dist_list,cache['querys'],sample['title'])
+    sample = min_max_mean_std(sample,query_title_levs,'query_title','lev', **cache)
+    query_argmx = query_title_levs.argmin(axis=1)
+    sample['query_title_min_lev_weight'] = cache['weights'][cache['idx'], query_argmx]
+    sample['mx_w_query_title_lev'] = query_title_levs[cache['idx'],cache['weight_argmax']]
+    sample['prefix_title_lev'] = list(map(lev_distance,sample['prefix'],sample['title']))
 
-        max_w_query_len = querys_lens[idx,weight_argmax]
+    sample['mx_w_prefix_query_lev'] = list(map(lev_distance,sample['prefix'],cache['max_w_query']))
 
-        sample['mx_w_prfx_qry_len_sub'] = max_w_query_len-sample['prefix_len']
+    levs = pd.DataFrame(np.sort(query_title_levs, axis=1),columns=['lev_'+str(i) for i in range(11)], index=sample.index)
+    sample = pd.concat([sample,levs],axis=1)
 
-        sample['title_prefix_len_sub'] = sample['title_len']-sample['prefix_len']
-        sample['query_title_len_sub'] = sample['query_mean_len'] - sample['title_len']
-        sample['query_prefix_len_sub'] = sample['query_mean_len'] - sample['prefix_len']
-        sample['prefix_query_len_div'] = sample['prefix_len'].div(sample['query_mean_len'])
-        sample['prefix_title_len_div'] = sample['prefix_len'].div(sample['title_len'])
+    del query_title_levs, query_argmx, levs
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-        print('   cost: %.1f ' %(time()-start))
+def jaccard_features(sample, **cache):
+    print('------ jaccard features',end='')
+    start = time()
+    def jaccard(s1,s2):
+        inter=len([w for w in s1 if w in s2])
+        union = len(s1)+len(s2)-inter
+        return inter/(union+0.001)
 
-        return sample
+    def jaccard_dist(querys,data):
+        res = [jaccard(q,data) for q in querys]
+        return res
 
-    def weight_features(sample):
-        print('------ weight features',end='')
-        print('weight fea:',sample.shape, weights.shape)
-        start = time()
+    print('jaccard->querys:', cache['querys'].shape)
+    querys_title_jac = map_to_array(jaccard_dist,cache['querys'],sample['title'])
+    sample = min_max_mean_std(sample,querys_title_jac,'query_title','jac', **cache)
+    query_argmax = querys_title_jac.argmax(axis=1)
+    sample['query_title_max_jac_weight'] = cache['weights'][cache['idx'], query_argmax]
+    sample['mx_w_query_title_jac'] = querys_title_jac[cache['idx'],cache['weight_argmax']]
+    sample['prefix_title_jac'] = list(map(jaccard,sample['prefix'],sample['title']))
 
-        num = weights.copy()
-        num[num>0]=1
-        sample['query_num'] = np.sum(num,axis=1)
+    jacs = pd.DataFrame(-np.sort(-querys_title_jac,axis=1),columns=['query_title_jac_'+str(i) for i in range(11)], index=sample.index)
+    sample = pd.concat([sample,jacs],axis=1)
+    sample = sample.fillna(0)
 
-        sample['weight_sum'] = np.sum(weights,1)
-        sample = min_max_mean_std(sample,weights,'weight','')
+    del querys_title_jac,query_argmax,jacs
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-        print('   cost: %.1f ' %(time()-start))
-        return sample
+def get_word_seg(sentence, stop_words, **params):
+    word_seg = [word for word in jieba.cut(sentence) if (word not in stop_words)]
+    return word_seg
 
-    def get_sentence_vec(sentence):
-        s_vector = np.zeros((len(w2v_model['我'])))
-        if sentence:
-            count=0
-            for word in jieba.cut(sentence) :
-                if word not in stop_words:
-                    try:
-                        vec = w2v_model[word]
-                        s_vector += vec
-                        count += 1
-                    except (KeyError):
-                        pass
-            if count:
-                s_vector /= count
-        return s_vector
+def get_sentence_vec(word_seg, w2v_model, **params):
+    s_vector = np.zeros((len(w2v_model['我'])))
+    if len(word_seg) > 0:
+        count=0
+        for word in word_seg :
+            try:
+                vec = w2v_model[word]
+                s_vector += vec
+                count += 1
+            except (KeyError):
+                pass
+        if count:
+            s_vector /= count
+    return s_vector
 
-    def cosine(v1,v2):
-        if len(v1.shape)==1:
-            multi = np.dot(v1,v2)
-            axis=None
-        else:
-            multi = np.sum(v1*v2,1)
-            axis=1
-        s1_norm = np.linalg.norm(v1,axis=axis)
-        s2_norm = np.linalg.norm(v2,axis=axis)
-        cos = multi/(s1_norm*s2_norm+0.001)
-        return cos
+def addSegCahce(sample, cache):
+    print('------ get sentence seg',end='')
+    start = time()
 
-    def sentence_simi(s1,s2):
-        s1_vec = get_sentence_vec(s1)
-        s2_vec = get_sentence_vec(s2)
-        cos = cosine(s1_vec,s2_vec)
-        return cos
+    tempDf = sample['title'].drop_duplicates()
+    temp_segs = np.array(list(map(lambda x: get_word_seg(x, **cache), tempDf)))
+    tempDf = pd.Series(temp_segs, index=tempDf)
+    cache['title_seg'] = tempDf.loc[sample.title].values
 
-    def query_data_cos(query,data):
-        q_data_cos = [sentence_simi(q,data) for q in query]
-        return q_data_cos
+    tempDf = sample['prefix'].drop_duplicates()
+    temp_segs = np.array(list(map(lambda x: get_word_seg(x, **cache), tempDf)))
+    tempDf = pd.Series(temp_segs, index=tempDf)
+    cache['prefix_seg'] = tempDf.loc[sample.prefix].values
 
-    def word2vec_features_1(sample,cos_feature=False):
-        print('------ word2vec features 1',end='')
-        start = time()
+#     tempDf = sample['query_prediction'].drop_duplicates()
+#     querys = cache['querys'][tempDf.index]
+#     temp_segs = np.array(list(map(lambda x: [get_word_seg(q, **cache) for q in x], querys)))
+#     tempDf = pd.DataFrame(temp_segs, index=tempDf)
+#     cache['query_seg'] = tempDf.loc[sample.query_prediction].values
+#     cache['mx_w_query_seg'] = cache['query_seg'][cache['idx'], cache['weight_argmax']]
 
-        title_embed = map_to_array(get_sentence_vec,sample['title'])
-        prefix_embed = map_to_array(get_sentence_vec,sample['prefix'])
+    tempDf = sample['query_prediction'].drop_duplicates()
+    querys = cache['max_w_query'][tempDf.index]
+    temp_segs = np.array(list(map(lambda x: get_word_seg(x, **cache), querys)))
+    tempDf = pd.Series(temp_segs, index=tempDf)
+    cache['mx_w_query_seg'] = tempDf.loc[sample.query_prediction].values
 
-        max_w_query = querys[idx,weight_argmax]
-        mx_w_query_embed = map_to_array(get_sentence_vec,max_w_query)
+    del temp_segs,tempDf,querys
+    print('   cost: %.1f ' %(time()-start))
+    return cache
 
-        if cos_feature:
-            querys_title_cos = [cosine(map_to_array(get_sentence_vec,querys[:,i],paral=True),title_embed) for i in range(11)]
-            querys_title_cos = np.array(querys_title_cos).T
-            sample = min_max_mean_std(sample,querys_title_cos,'querys_title','cos')
-            sample['mx_w_query_title_cos'] = querys_title_cos[idx,weight_argmax]
+def addEmbedCache(sample, cache):
+    print('------ get w2v embed 1',end='')
+    start = time()
+    cache['title_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['title_seg'])))
+    cache['prefix_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['prefix_seg'])))
+#     cache['query_embed'] = np.array(list(map(lambda x: [get_sentence_vec(q, **cache) for q in x], cache['query_seg'])))
+#     cache['mx_w_query_embed'] = cache['query_embed'][cache['idx'], cache['weight_argmax']]
+    cache['mx_w_query_embed'] = np.array(list(map(lambda x: get_sentence_vec(x, **cache), cache['mx_w_query_seg'])))
+    print('   cost: %.1f ' %(time()-start))
+    return cache
 
-        sample['prefix_title_cos'] = cosine(title_embed,prefix_embed)
-        sample['prefix_mx_query_cos'] = cosine(prefix_embed,mx_w_query_embed)
-        sample['mx_w_query_title_cos'] = cosine(mx_w_query_embed,title_embed)
+def cosine(v1,v2):
+    if len(v1.shape)==1:
+        multi = np.dot(v1,v2)
+        axis=None
+    else:
+        multi = np.sum(v1*v2,1)
+        axis=1
+    s1_norm = np.linalg.norm(v1,axis=axis)
+    s2_norm = np.linalg.norm(v2,axis=axis)
+    cos = multi/(s1_norm*s2_norm+0.001)
+    return cos
 
-        title_embed = pd.DataFrame(title_embed,columns=['title_w2v_'+str(i) for i in range(50)], index=sample.index)
-        sample = pd.concat([sample,title_embed],axis=1)
+def calcWmSimilar(strList1, strList2, wvModel):
+    '''
+    计算文档的词移距离
+    '''
+    dist = wvModel.wmdistance(strList1, strList2)
+    if dist==np.inf:
+        return np.nan
+    else:
+        return dist
 
-        prefix_embed = pd.DataFrame(prefix_embed,columns=['prefix_w2v_'+str(i) for i in range(50)], index=sample.index)
-        sample = pd.concat([sample,prefix_embed],axis=1)
+def w2v_features(sample, **cache):
+    print('------ w2v features 1',end='')
+    start = time()
+    title_embed = pd.DataFrame(cache['title_embed'],columns=['title_w2v_'+str(i) for i in range(50)], index=sample.index)
+    sample = pd.concat([sample,title_embed],axis=1)
 
-        mx_w_query_embed = pd.DataFrame(mx_w_query_embed,columns=['mx_w_query_w2v_'+str(i) for i in range(50)], index=sample.index)
-        sample = pd.concat([sample,mx_w_query_embed],axis=1)
+    prefix_embed = pd.DataFrame(cache['prefix_embed'],columns=['prefix_w2v_'+str(i) for i in range(50)], index=sample.index)
+    sample = pd.concat([sample,prefix_embed],axis=1)
 
-        print('   cost: %.1f ' %(time()-start))
-        return sample
+    mx_w_query_embed = pd.DataFrame(cache['mx_w_query_embed'],columns=['mx_w_query_w2v_'+str(i) for i in range(50)], index=sample.index)
+    sample = pd.concat([sample,mx_w_query_embed],axis=1)
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-    def word2vec_features_2(sample, alias='2'):
-        print('------ word2vec features 2',end='')
-        start = time()
+def cos_feature(sample, alias='0', **cache):
+    print('------ cos features 1',end='')
+    start = time()
 
-        def calc_all_cos(s1,s2,s3):
-            prefix_embed = get_sentence_vec(s1)
-            title_embed = get_sentence_vec(s2)
-            mx_w_query_embed = get_sentence_vec(s3)
-            cos = [0,0,0]
-            cos[0] = cosine(prefix_embed,title_embed)
-            cos[1] = cosine(prefix_embed,mx_w_query_embed)
-            cos[2] = cosine(title_embed,mx_w_query_embed)
-            return cos
+    sample['prefix_title_cos_%s'%alias] = cosine(cache['title_embed'],cache['prefix_embed'])
+    sample['prefix_mx_query_cos_%s'%alias] = cosine(cache['prefix_embed'],cache['mx_w_query_embed'])
+#     query_cos = np.array([cosine(cache['query_embed'][:,i,:], cache['title_embed']) for i in range(cache['query_embed'].shape[1])]).T
+#     sample['query_title_mean_cos_%s'%alias] = np.divide(np.multiply(query_cos, cache['weights']).sum(axis=1), sample['query_num'])
+#     sample['query_title_max_cos_%s'%alias] = query_cos.max(axis=1)
+#     query_argmax_cos = query_cos.argmax(axis=1)
+#     sample['query_title_max_cos_%s_weight'%alias] = cache['weights'][cache['idx'], query_argmax_cos]
+#     sample['mx_w_query_title_cos_%s'%alias] = query_cos[cache['idx'], cache['weight_argmax']]
+    sample['mx_w_query_title_cos_%s'%alias] = cosine(cache['title_embed'],cache['mx_w_query_embed'])
 
-        max_w_query = querys[idx,weight_argmax]
-        cos = list(map(calc_all_cos,sample['prefix'],sample['title'],max_w_query))
+#     del query_cos,query_argmax_cos
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-        cos = pd.DataFrame(cos,columns=['prefix_title_cos_%s'%alias,'prefix_mx_query_cos_%s'%alias,'mx_w_query_title_cos_%s'%alias], index=sample.index)
+def wm_feature(sample, alias='0', **cache):
+    print('------ word_move distance features 1',end='')
+    start = time()
 
-        sample = pd.concat([sample,cos],axis=1)
-        print('   cost: %.1f ' %(time()-start))
-        return sample
+    sample['prefix_title_wm_%s'%alias] = list(map(lambda x,y: calcWmSimilar(x,y,cache['w2v_model']), cache['title_seg'],cache['prefix_seg']))
+    sample['prefix_mx_query_wm_%s'%alias] = list(map(lambda x,y: calcWmSimilar(x,y,cache['w2v_model']), cache['prefix_seg'],cache['mx_w_query_seg']))
+    sample['mx_w_query_title_wm_%s'%alias] = list(map(lambda x,y: calcWmSimilar(x,y,cache['w2v_model']), cache['mx_w_query_seg'],cache['title_seg']))
 
-    def jaccard_features(sample):
-        print('------ jaccard features',end='')
-        start = time()
-        def jaccard(s1,s2):
-            inter=len([w for w in s1 if w in s2])
-            union = len(s1)+len(s2)-inter
-            return inter/(union+0.001)
+    print('   cost: %.1f ' %(time()-start))
+    return sample
 
-        def jaccard_dist(querys,data):
-            res = [jaccard(q,data) for q in querys]
-            return res
-
-        print('jaccard->querys:', querys.shape)
-        querys_title_jac = map_to_array(jaccard_dist,querys,sample['title'])
-        sample = min_max_mean_std(sample,querys_title_jac,'query_title','jac')
-        sample['mx_w_query_title_jac'] = querys_title_jac[idx,weight_argmax]
-        sample['prefix_title_jac'] = list(map(jaccard,sample['prefix'],sample['title']))
-
-        jacs = pd.DataFrame(-np.sort(-querys_title_jac,axis=1),columns=['query_title_jac_'+str(i) for i in range(11)], index=sample.index)
-
-        sample = pd.concat([sample,jacs],axis=1)
-
-        sample = sample.fillna(0)
-        print('   cost: %.1f ' %(time()-start))
-        return sample
-
-
-    sample = str_lower(sample)
+def text_features(sample, w2v_model_1, ext_vec_dirs, **cache):
     tempDf = sample.drop_duplicates(['prefix','query_prediction','title'])
-    # tempDf['old_prefix'] = tempDf['prefix']
-    # tempDf['old_title'] = tempDf['title']
-    querys,weights,norm_weights = get_query_weight(tempDf['query_prediction'])
-#    tempDf.drop(['query_prediction'],axis=1,inplace=True)
+    tempDf.index = list(range(tempDf.shape[0]))
+    cache = addQueryCache(tempDf['query_prediction'], cache)
     gc.collect()
-    idx,weight_argmax = get_max_weight_idx()
-    tempDf = weight_features(tempDf)
+    tempDf = weight_features(tempDf, **cache)
     gc.collect()
-    tempDf = len_features(tempDf)
+    tempDf = len_features(tempDf, **cache)
     gc.collect()
-    tempDf = lev_features(tempDf)
+    tempDf = lev_features(tempDf, **cache)
     gc.collect()
-    tempDf = jaccard_features(tempDf)
+    tempDf = jaccard_features(tempDf, **cache)
     gc.collect()
-    w2v_model = w2v_model_1
-    tempDf = word2vec_features_1(tempDf)
+
+    cache['w2v_model'] = w2v_model_1
+    cache = addSegCahce(tempDf, cache)
+    gc.collect()
+    cache = addEmbedCache(tempDf, cache)
+    gc.collect()
+    tempDf = w2v_features(tempDf, **cache)
+    gc.collect()
+    tempDf = cos_feature(tempDf, **cache)
+    gc.collect()
+    tempDf = wm_feature(tempDf, **cache)
+    del cache['w2v_model']
     gc.collect()
 
     for i,dir in enumerate(ext_vec_dirs):
-        w2v_model = read_w2v_model(dir, persist=False)#
-        tempDf = word2vec_features_2(tempDf,str(i+2))
-        del w2v_model
+        cache['w2v_model'] = read_w2v_model(dir, persist=False)
+        cache = addEmbedCache(tempDf, cache)
+        gc.collect()
+        tempDf = cos_feature(tempDf, alias=str(i+1), **cache)
+        gc.collect()
+        tempDf = wm_feature(tempDf, alias=str(i+1), **cache)
+        del cache['w2v_model']
         gc.collect()
 
+    del cache
     sample = sample.merge(
         tempDf[['prefix','query_prediction','title'] + np.setdiff1d(tempDf.columns,sample.columns).tolist()],
         how='left',
@@ -445,6 +522,8 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
         'num_leaves': 127,
         'learning_rate': 0.02,
         'feature_fraction': 1,
+        'bagging_fraction': 0.95,
+    	'bagging_freq': 3,
         'num_threads':-1,
         'is_training_metric':True,
     }
@@ -503,12 +582,12 @@ if __name__ == "__main__":
     vec_dir_2 = '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt'
     ext_vec_dirs = [
         '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt',
-        '../data/sgns.merge.bigram/sgns.merge.bigram',
-        '../data/sgns.merge.word/sgns.merge.word',
-        '../data/sgns.merge.char/sgns.merge.char',
+#         '../data/sgns.merge.bigram/sgns.merge.bigram',
+#         '../data/sgns.merge.word/sgns.merge.word',
+#         '../data/sgns.merge.char/sgns.merge.char',
         ]
     srop_word_dir = '../xkl/stop_words.txt'
-    test_result_dir = './result/xkl_4w2v.csv'
+    test_result_dir = './result/xkl_fea.csv'
 
     # 导入数据
     print("-- 导入原始数据", end='')
@@ -528,6 +607,14 @@ if __name__ == "__main__":
     raw_test['query_prediction'].replace({'':'{}', np.nan:'{}'}, inplace=True)
     raw_train = str_lower(raw_train)
     raw_test = str_lower(raw_test)
+    gc.collect()
+    print('   cost: %.1f ' %(time() - start))
+
+    # 提取全局特征
+    print("-- 提取全局特征", end='')
+    start = time()
+    raw_train = queryNum(raw_train)
+    raw_test = queryNum(raw_test)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
@@ -575,18 +662,18 @@ if __name__ == "__main__":
     # 提取其他文本特征
     print("-- 提取训练集其他文本特征", end='')
     start = time()
-    raw_train = text_features(raw_train, w2v_model_1, ext_vec_dirs, stop_words)
-    # raw_train = text_features(raw_train, w2v_model_1, w2v_model_2, stop_words)
+    raw_train = text_features(raw_train, w2v_model_1, ext_vec_dirs, stop_words=stop_words)
     gc.collect()
     print("-- 提取验证集其他文本特征", end='')
-    raw_test = text_features(raw_test, w2v_model_1, ext_vec_dirs, stop_words)
-    # raw_vali = text_features(raw_vali, w2v_model_1, w2v_model_2, stop_words)
+    raw_test = text_features(raw_test, w2v_model_1, ext_vec_dirs, stop_words=stop_words)
     del w2v_model_1, stop_words
     gc.collect()
 
     #开始训练
-    best_iter = 766
-    max_thre = 0.4
+#     best_iter = 663
+#     max_thre = 0.37
+    best_iter = 958
+    max_thre = 0.37
     print('-- final training ')
     train_X,train_y = get_x_y(raw_train)
     model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)
@@ -597,6 +684,9 @@ if __name__ == "__main__":
     test_X,_ = get_x_y(raw_test)
     test_pred = model_.predict(test_X)
 
+    raw_test['pred'] = vali_pred
+    raw_test.to_csv('./result/xkl_fea_testa.csv', index=False)
+
     print('-- process to get result')
     test_y = pd.Series(list(map(one_zero2,test_pred,[max_thre]*len(test_pred))))
     test_y.to_csv(test_result_dir,header=None,index=None)
@@ -606,3 +696,4 @@ if __name__ == "__main__":
     print('feature importance:')
     scoreDf = pd.DataFrame({'fea': train_X.columns, 'importance': model_.feature_importance()})
     print(scoreDf.sort_values(['importance'], ascending=False).head(100))
+    scoreDf.sort_values(['importance'], ascending=False).to_csv('./fea_score.csv')
