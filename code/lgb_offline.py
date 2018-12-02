@@ -587,7 +587,7 @@ def custom_eval(preds, train_data):
     f1 = metrics.f1_score(labels, predLabels)
     return 'f1', f1, True
 
-def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, random_state=None):
+def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, weight=None, random_state=None):
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
@@ -611,7 +611,7 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
     if random_state is not None:
         params['seed'] = random_state
 
-    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])
+    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'], weight=weight)
 
     if vali_y is not None:
         lgb_vali = lgb.Dataset(vali_X,vali_y)
@@ -792,6 +792,7 @@ if __name__ == "__main__":
     best_thr_list = []
     best_f1_list = []
     auc_list = []
+    # weight = [1] * (raw_train.shape[0] - 50000) + [8] * 50000
     for rd in range(5):
         model,best_iter,vali_pred,vali_y = train_and_predict(raw_train, raw_vali, random_state=rd)
         best_iter_list.append(best_iter)

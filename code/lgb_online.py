@@ -258,9 +258,7 @@ def weight_features(sample, **cache):
     start = time()
 
     sample['weight_sum'] = np.sum(cache['weights'],1)
-    # sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
-    sample['weight_min'] = np.min(cache['weights'],1)
-    sample['weight_max'] = np.max(cache['weights'],1)
+    sample = min_max_mean_std(sample,cache['weights'],'weight','', **cache)
     sample['weight_mean'] = np.mean(cache['weights'],1)
     sample['weight_std'] = np.std(cache['weights'],1)
 
@@ -346,6 +344,7 @@ def jaccard_features(sample, **cache):
     return sample
 
 def get_word_seg(sentence, stop_words, **params):
+    sentence = sentence.replace('%2C', ',')
     word_seg = [word for word in jieba.cut(sentence) if (word not in stop_words)]
     return word_seg
 
@@ -508,7 +507,7 @@ def text_features(sample, w2v_model_1, ext_vec_dirs, **cache):
         on=['prefix','query_prediction','title'])
     return sample
 
-def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, random_state=None):
+def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, weight=None, random_state=None):
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
@@ -531,7 +530,7 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
     if random_state is not None:
         params['seed'] = random_state
 
-    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'])
+    lgb_train = lgb.Dataset(train_X, train_y, categorical_feature=['tag'], weight=weight)
 
     if vali_y is not None:
         lgb_vali = lgb.Dataset(vali_X,vali_y, reference=lgb_train)
@@ -577,8 +576,8 @@ if __name__ == "__main__":
     # 路径
     train_dir = '../data/oppo_data_ronud2_20181107/data_train.txt'
     vali_dir = '../data/oppo_data_ronud2_20181107/data_vali.txt'
-    test_dir = '../data/oppo_data_ronud2_20181107/data_test.txt'
-    vec_dir_1 = '../data/keng_w2v_model/w2v_total_final_50wei_1.model'
+    test_dir = '../data/oppo_data_ronud2_20181107/data_testB.txt'
+    vec_dir_1 = '../data/B_keng_w2v_model/w2v_total_final_50wei_1.model'
     ext_vec_dirs = [
         '../data/merge_sgns_bigram_char300/merge_sgns_bigram_char300.txt',
 #         '../data/sgns.merge.bigram/sgns.merge.bigram',
@@ -586,7 +585,8 @@ if __name__ == "__main__":
 #         '../data/sgns.merge.char/sgns.merge.char',
         ]
     srop_word_dir = '../xkl/stop_words.txt'
-    test_result_dir = './result/xkl_fea2.csv'
+#     test_result_dir = './result/xkl_b_drop.csv'
+    modelName = 'xkl_b_noweight'
 
     # 导入数据
     print("-- 导入原始数据", end='')
@@ -594,7 +594,8 @@ if __name__ == "__main__":
     raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'])
     raw_vali = importDf(vali_dir, colNames=['prefix','query_prediction','title','tag','label'])
     raw_test = importDf(test_dir, colNames=['prefix','query_prediction','title','tag'])
-    raw_train = pd.concat([raw_train, raw_vali], ignore_index=True).reset_index(drop=True)
+    raw_train = pd.concat([raw_train, raw_vali], ignore_index=True).reset_index().rename(columns={'index':'instance_id'})
+    raw_test = raw_test.reset_index().rename(columns={'index':'instance_id'})
     del raw_vali
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
@@ -668,14 +669,17 @@ if __name__ == "__main__":
     del w2v_model_1, stop_words
     gc.collect()
 
+    # 重新调整好排序
+    raw_train = raw_train.sort_values(['instance_id']).drop(['instance_id'],axis=1)
+    raw_test = raw_test.sort_values(['instance_id']).drop(['instance_id'],axis=1)
+
     #开始训练
-#     best_iter = 663
-#     max_thre = 0.37
-    best_iter = 895
-    max_thre = 0.38
+    best_iter = 800
+    max_thre = 0.39
+#     weight = [1] * (raw_train.shape[0] - 50000) + [8] * 50000
     print('-- final training ')
     train_X,train_y = get_x_y(raw_train)
-    model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)
+    model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)#, weight=weight
     print('best_iteration:',best_iter)
 
     print('---- predict')
@@ -684,15 +688,17 @@ if __name__ == "__main__":
     test_pred = model_.predict(test_X)
 
     raw_test['pred'] = test_pred
-    raw_test.to_csv('./result/xkl_fea2_testa.csv', index=False)
+    raw_test.to_csv('./result/%s_test.csv'%modelName, index=False)
 
     print('-- process to get result')
     test_y = pd.Series(list(map(one_zero2,test_pred,[max_thre]*len(test_pred))))
-    test_y.to_csv(test_result_dir,header=None,index=None)
+    test_y.to_csv('./result/%s.csv'%modelName, header=None,index=None)
 
     print('print result')
-    result_analysis(test_pred)
+#     result_analysis(test_pred)
+    print('pred mean:', np.mean(test_pred))
+    print('label mean:', np.mean(test_y))
     print('feature importance:')
     scoreDf = pd.DataFrame({'fea': train_X.columns, 'importance': model_.feature_importance()})
     print(scoreDf.sort_values(['importance'], ascending=False).head(100))
-    scoreDf.sort_values(['importance'], ascending=False).to_csv('./fea_score.csv')
+#     scoreDf.sort_values(['importance'], ascending=False).to_csv('./fea_score.csv')
