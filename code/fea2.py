@@ -55,22 +55,35 @@ def addQueryFea(df):
     df = df.merge(tempDf[['prefix']+np.setdiff1d(tempDf.columns,df.columns).tolist()], how='left', on=['prefix'])
     return df
 
+def addPrefixTitlePos(df):
+    '''
+    prefix在title中的位置
+    '''
+    tempDf = df.drop_duplicates(['prefix','title'])
+    tempDf['prefix_title_pos'] = tempDf[['prefix','title']].dropna().apply(lambda x: x.title.strip().lower().find(x.prefix.strip().lower()), axis=1)
+    tempDf['prefix_title_relative_pos'] = tempDf['prefix_title_pos'] / tempDf['title_len']
+    tempDf.loc[tempDf.prefix_title_relative_pos<0, 'prefix_title_relative_pos'] = np.nan
+    df = df.merge(tempDf[['prefix','title']+np.setdiff1d(tempDf.columns,df.columns).tolist()], how='left', on=['prefix','title'])
+    return df
+
 def addTextLenFea(df):
     '''
     计算文本长度
     '''
-    df['prefix_len'] = df['prefix'].dropna().map(lambda x: len(x.strip()))
-    df['title_len'] = df['title'].dropna().map(lambda x: len(x.strip()))
-    df['prefix_title_len_diff'] = df['prefix_len'] - df['title_len']
-    df['prefix_title_len_ratio'] = df['prefix_len'] / df['title_len']
-    df.fillna({'prefix_len':0,'title_len':0}, inplace=True)
+    tempDf = df.drop_duplicates(['prefix','title'])
+    tempDf['prefix_len'] = tempDf['prefix'].dropna().map(lambda x: len(x.strip()))
+    tempDf['title_len'] = tempDf['title'].dropna().map(lambda x: len(x.strip()))
+    tempDf['prefix_title_len_diff'] = tempDf['prefix_len'] - tempDf['title_len']
+    tempDf['prefix_title_len_ratio'] = tempDf['prefix_len'] / tempDf['title_len']
+    tempDf.fillna({'prefix_len':0,'title_len':0}, inplace=True)
+    df = df.merge(tempDf[['prefix','title']+np.setdiff1d(tempDf.columns,df.columns).tolist()], how='left', on=['prefix','title'])
     return df
 
 def addPrefixIsinTitle(df):
     '''
     title中是否包含了prefix
     '''
-    df['prefix_isin_title'] = df[['prefix','title']].dropna().apply(lambda x: x.title.lower().find(x.prefix.lower())>=0, axis=1).astype(int)
+    # df['prefix_isin_title'] = df[['prefix','title']].dropna().apply(lambda x: x.title.lower().find(x.prefix.lower())>=0, axis=1).astype(int)
     df['prefix_in_title_ratio'] = df[['prefix_seg','title']].dropna().apply(lambda x: np.mean([1 if x.title.lower().find(w)>=0 else 0 for w in x.prefix_seg]), axis=1)
     return df
 
@@ -280,7 +293,8 @@ def addCvHisFea(df, nFold=5, random_state=0):
     '''
     多折交叉添加历史统计特征
     '''
-    kf = StratifiedKFold(n_splits=nFold, random_state=random_state, shuffle=True)
+    kf = KFold(n_splits=nFold)
+    # kf = StratifiedKFold(n_splits=nFold, random_state=random_state, shuffle=True)
     dfList = []
     for i, (statIdx, taskIdx) in enumerate(kf.split(df.values, df['label'].values)):
         tempDf = addHisFeas(df.iloc[taskIdx], df.iloc[statIdx])
@@ -330,14 +344,15 @@ def addGlobalFeas(df, statDf=None):
     ]
     for c1,c2 in crossColList:
         df = addCrossColNunique(df, statDf, c1, c2)
+    df = addQueryFea(df)
+    df = addTextLenFea(df)
+    df = addPrefixTitlePos(df)
     return df
 
 def addTextFeas(df, **params):
     '''
     添加文本特征
     '''
-    df = addQueryFea(df)
-    df = addTextLenFea(df)
     # df = addPrefixIsinTitle(df)
     # df = addTfidfMatrix(df)
     df = addPrefixTitleDist(df, params['wv'])
@@ -589,8 +604,8 @@ class FeaFactory:
             # 获取历史统计特征
             startTime = datetime.now()
             hisDf = addHisFeas(testDf, trainDf)
-            # tempDf = addCvHisFea(trainDf, newRatio=newRatio, random_state=self.seed)
-            tempDf = getHisFeaDf(trainDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
+            tempDf = addCvHisFea(trainDf, random_state=self.seed)
+            # tempDf = getHisFeaDf(trainDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
             offlineDf = pd.concat([tempDf,hisDf], ignore_index=True)
             logging.warning('prepare offline his time: %s' % (datetime.now() - startTime))
 
@@ -629,8 +644,8 @@ class FeaFactory:
             # 获取历史统计特征
             startTime = datetime.now()
             hisDf = addHisFeas(testDf, statDf)
-            # tempDf = addCvHisFea(statDf, newRatio=newRatio, random_state=self.seed)
-            tempDf = getHisFeaDf(statDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
+            tempDf = addCvHisFea(statDf, random_state=self.seed)
+            # tempDf = getHisFeaDf(statDf, nFold=self.nfold, newRatio=newRatio, random_state=self.seed)
             onlineDf = pd.concat([tempDf,hisDf], ignore_index=True)
             logging.warning('prepare online his time: %s' % (datetime.now() - startTime))
 
