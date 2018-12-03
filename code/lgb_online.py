@@ -4,16 +4,19 @@ import sys
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
+from sklearn import metrics
 from sklearn.metrics import f1_score, log_loss
 import scipy as sp
 from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import jieba
 from Levenshtein import distance as lev_distance
-from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
+from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold, train_test_split
+from gensim.corpora import Dictionary
 from gensim.models import KeyedVectors, Word2Vec
+from datetime import *
 from time import time
 from multiprocessing import Pool
-import gc, os
+import gc, os, math
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -507,7 +510,7 @@ def text_features(sample, w2v_model_1, ext_vec_dirs, **cache):
         on=['prefix','query_prediction','title'])
     return sample
 
-def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds = 2000, weight=None, random_state=None):
+def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, num_rounds=2000, weight=None, random_state=None, verbose=10):
     def lgb_f1_score(y_hat, data):
         y_true = data.get_label()
         y_hat = np.round(y_hat)
@@ -534,23 +537,24 @@ def runLGBCV(train_X, train_y,vali_X=None,vali_y=None, seed_val=2012, num_rounds
 
     if vali_y is not None:
         lgb_vali = lgb.Dataset(vali_X,vali_y, reference=lgb_train)
-        model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=10,early_stopping_rounds=200,
+        model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=verbose,early_stopping_rounds=200,
                           valid_sets=[lgb_vali],valid_names=['val'])
 
     else:
-        model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=10,
+        model = lgb.train(params,lgb_train,num_boost_round=num_rounds,verbose_eval=verbose,
                           valid_sets=[lgb_train],valid_names=['train'])
 
     return model,model.best_iteration
 
-def get_x_y(data):
+def get_x_y(data, dropCols=[]):
     drop_list = ['prefix','query_prediction','title']
+    drop_list.extend(dropCols)
     if 'label' in data.columns:
         y = data['label']
-        data.drop(drop_list+['label'],axis=1, inplace=True)
+        data = data.drop(drop_list+['label'],axis=1)
     else:
         y=None
-        data.drop(drop_list,axis=1, inplace=True)
+        data = data.drop(drop_list,axis=1)
     print('------ ',data.shape)
     return data,y
 
@@ -569,9 +573,6 @@ def train_and_predict(samples,vali_samples,num_rounds=3000, **params):
     vali_pred = model.predict(vali_X)
     return model,best_iter,vali_pred,vali_y
 
-def result_analysis(res):
-    print('mean : ',np.mean(res))
-
 if __name__ == "__main__":
     # 路径
     train_dir = '../data/oppo_data_ronud2_20181107/data_train.txt'
@@ -585,69 +586,80 @@ if __name__ == "__main__":
 #         '../data/sgns.merge.char/sgns.merge.char',
         ]
     srop_word_dir = '../xkl/stop_words.txt'
-#     test_result_dir = './result/xkl_b_drop.csv'
-    modelName = 'xkl_b_noweight'
+    modelName = 'xkl_b_final'
 
-    # 导入数据
+    # ----------导入数据-----------
     print("-- 导入原始数据", end='')
     start = time()
     raw_train = importDf(train_dir, colNames=['prefix','query_prediction','title','tag','label'])
     raw_vali = importDf(vali_dir, colNames=['prefix','query_prediction','title','tag','label'])
     raw_test = importDf(test_dir, colNames=['prefix','query_prediction','title','tag'])
-    raw_train = pd.concat([raw_train, raw_vali], ignore_index=True).reset_index().rename(columns={'index':'instance_id'})
+    # raw_train = pd.concat([raw_train, raw_vali], ignore_index=True).reset_index().rename(columns={'index':'instance_id'})
+    raw_train = raw_train.reset_index().rename(columns={'index':'instance_id'})
+    raw_vali = raw_vali.reset_index().rename(columns={'index':'instance_id'})
     raw_test = raw_test.reset_index().rename(columns={'index':'instance_id'})
-    del raw_vali
-    gc.collect()
+    # del raw_vali
+    # gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
-    # 清洗数据
+    # ----------清洗数据------------
     print("-- 清洗数据", end='')
     start = time()
     raw_train['query_prediction'].replace({'':'{}', np.nan:'{}'}, inplace=True)
+    raw_vali['query_prediction'].replace({'':'{}', np.nan:'{}'}, inplace=True)
     raw_test['query_prediction'].replace({'':'{}', np.nan:'{}'}, inplace=True)
     raw_train = str_lower(raw_train)
+    raw_vali = str_lower(raw_vali)
     raw_test = str_lower(raw_test)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
-    # 提取全局特征
+    # ---------提取全局特征---------
     print("-- 提取全局特征", end='')
     start = time()
     raw_train = queryNum(raw_train)
+    raw_vali = queryNum(raw_vali)
     raw_test = queryNum(raw_test)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
-    ## 提取统计特征
-    # 提取训练集统计特征
-    print("-- 提取训练集统计特征", end='')
+    ## ----------提取统计特征------------
+    # 提取测试集统计特征
+    print("-- 提取测试集统计特征", end='')
     start = time()
-    tempTrain = raw_train
-    raw_train = k_fold_stat_features(raw_train)
+    tempTrain = pd.concat([raw_train, raw_vali], ignore_index=True)
+    raw_test = stat_features(tempTrain, raw_test)
+    del tempTrain
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
     # 提取验证集统计特征
     print("-- 提取验证集统计特征", end='')
     start = time()
-    raw_test = stat_features(tempTrain, raw_test)
-    del tempTrain
+    raw_vali = stat_features(raw_train, raw_vali)
     gc.collect()
     print('   cost: %.1f ' %(time() - start))
 
-    ## 提取文本特征
+    # 提取训练集统计特征
+    print("-- 提取训练集统计特征", end='')
+    start = time()
+    raw_train = k_fold_stat_features(raw_train)
+    gc.collect()
+    print('   cost: %.1f ' %(time() - start))
+
+    ## ---------提取文本特征----------
     '''
     1、tag进行labelEncoder
     '''
     print("-- 对tag进行encoder", end='')
     start = time()
-    encoder = get_tag_dict(raw_train)
+    encoder = get_tag_dict(pd.concat([raw_train, raw_vali]))
     raw_train['tag'] = encoder.transform(raw_train['tag'])
+    raw_vali['tag'] = encoder.transform(raw_vali['tag'])
     raw_test['tag'] = encoder.transform(raw_test['tag'])
     print('   cost: %.1f ' %(time() - start))
     del encoder
     gc.collect()
-
 
     '''
     #2、其他
@@ -665,21 +677,68 @@ if __name__ == "__main__":
     raw_train = text_features(raw_train, w2v_model_1, ext_vec_dirs, stop_words=stop_words)
     gc.collect()
     print("-- 提取验证集其他文本特征", end='')
+    start = time()
+    raw_vali = text_features(raw_vali, w2v_model_1, ext_vec_dirs, stop_words=stop_words)
+    gc.collect()
+    print("-- 提取测试集其他文本特征", end='')
     raw_test = text_features(raw_test, w2v_model_1, ext_vec_dirs, stop_words=stop_words)
     del w2v_model_1, stop_words
     gc.collect()
 
-    # 重新调整好排序
+    # --------重新调整好排序-------
     raw_train = raw_train.sort_values(['instance_id']).drop(['instance_id'],axis=1)
+    raw_vali = raw_vali.sort_values(['instance_id']).drop(['instance_id'],axis=1)
     raw_test = raw_test.sort_values(['instance_id']).drop(['instance_id'],axis=1)
 
-    #开始训练
+#     # --------保存特征文件（供NN训练）--------
+#     dropCols = ['title_w2v_%d'%i for i in range(50)]
+#     dropCols.extend(['prefix_w2v_%d'%i for i in range(50)])
+#     dropCols.extend(['mx_w_query_w2v_%d'%i for i in range(50)])
+#     saveTime = datetime.now()
+#     raw_train.drop(dropCols, axis=1).to_csv('./temp/%s_train_%s.csv' % (modelName, saveTime.strftime("%Y%m%d%H%M")), index=False)
+#     raw_vali.drop(dropCols, axis=1).to_csv('./temp/%s_vali_%s.csv' % (modelName, saveTime.strftime("%Y%m%d%H%M")), index=False)
+#     raw_test.drop(dropCols, axis=1).to_csv('./temp/%s_test_%s.csv' % (modelName, saveTime.strftime("%Y%m%d%H%M")), index=False)
+#     gc.collect()
+
+#     # -----------线下模型训练（产生验证集预测值）-----------
+#     model,best_iter,vali_pred,vali_y = train_and_predict(raw_train, raw_vali, random_state=2018)
+#     resultDf = pd.DataFrame({'pred':vali_pred, 'label':vali_y})
+#     resultDf.to_csv('./result/%s_vali.csv'%modelName, index=False)
+#     del resultDf
+#     gc.collect()
+
+#     # 计算AUC
+#     fpr, tpr, thresholds = metrics.roc_curve(vali_y, vali_pred, pos_label=1)
+#     auc = metrics.auc(fpr, tpr)
+#     print('-- auc score: %f' % auc)
+
+#     # 计算F1
+#     scores = []
+#     print('-- search best split point')
+#     for thre in range(100):
+#         thre *=0.01
+#         score = metrics.f1_score(vali_y,list(map(one_zero2,vali_pred,[thre]*len(vali_pred))))
+#         scores.append(score)
+#     scores = np.array(scores)
+#     best_5 = np.argsort(scores)[-5:]
+#     best_5_s = scores[best_5]
+#     for x,y in zip(best_5,best_5_s):
+#         print('%.2f  %.4f' %(0.01*x,y))
+#     # max_thre = np.mean(best_5)*0.01
+#     del model
+#     gc.collect()
+
+    # --------线上模型训练---------
+    raw_train = pd.concat([raw_train, raw_vali], ignore_index=True)
+    del raw_vali
     best_iter = 800
     max_thre = 0.39
-#     weight = [1] * (raw_train.shape[0] - 50000) + [8] * 50000
-    print('-- final training ')
+    weight = [1] * (raw_train.shape[0] - 50000) + [8] * 50000
+
+    print('--------- final training--------')
     train_X,train_y = get_x_y(raw_train)
-    model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter)#, weight=weight
+    gc.collect()
+    model_,best_iter_ = runLGBCV(train_X, train_y,num_rounds=best_iter, weight=weight, verbose=False)#
     print('best_iteration:',best_iter)
 
     print('---- predict')
@@ -688,17 +747,16 @@ if __name__ == "__main__":
     test_pred = model_.predict(test_X)
 
     raw_test['pred'] = test_pred
-    raw_test.to_csv('./result/%s_test.csv'%modelName, index=False)
+    raw_test[['pred']].to_csv('./result/%s_test.csv'%modelName, index=False)
 
     print('-- process to get result')
     test_y = pd.Series(list(map(one_zero2,test_pred,[max_thre]*len(test_pred))))
     test_y.to_csv('./result/%s.csv'%modelName, header=None,index=None)
 
     print('print result')
-#     result_analysis(test_pred)
     print('pred mean:', np.mean(test_pred))
     print('label mean:', np.mean(test_y))
     print('feature importance:')
     scoreDf = pd.DataFrame({'fea': train_X.columns, 'importance': model_.feature_importance()})
     print(scoreDf.sort_values(['importance'], ascending=False).head(100))
-#     scoreDf.sort_values(['importance'], ascending=False).to_csv('./fea_score.csv')
+    scoreDf.sort_values(['importance'], ascending=False).to_csv('./fea_score.csv')
