@@ -7,6 +7,8 @@
 + nlp.py: 个人模型中与文本处理相关的函数封装
 + lgb_offline.py: 复赛最佳lgb的线下模型代码
 + lgb_online.py: 复赛最佳lgb的线上模型代码
++ fusai_analysis: 复赛数据分析文件
++ fusai_distribution: 复赛关于数据分布的分析以及分布抽样方案的研究
 + 其余队友代码均不公开
 
 ### 赛题说明
